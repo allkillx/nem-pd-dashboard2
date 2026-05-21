@@ -302,9 +302,10 @@ def fetch_market_data(days: float = 7, interval: str = "1h") -> pd.DataFrame:
 
 def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     """
-    Pivot long-form 5-min rows to wide table, then resample to 30-min trading intervals.
-    Price: time-weighted average over the 6 5-min intervals (mean = same here since equal spacing).
-    Demand: average MW over the 30-min window.
+    Pivot long-form 5-min rows to wide table — NO resampling.
+    Keeps original 5-min granularity so price spikes show as they really happened.
+
+    Function name kept for backwards compatibility but it no longer aggregates.
 
     Returns DataFrame with columns:
       timestamp, region, rrp, demand, avail_gen, reserve, period
@@ -313,7 +314,7 @@ def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
         index=["timestamp", "region"],
         columns="metric",
         values="value",
-        aggfunc="mean",
+        aggfunc="mean",  # 'mean' here just deduplicates if API ever returns duplicates for same ts+region
     ).reset_index()
     df = df.rename(columns={"price": "rrp"})
 
@@ -322,18 +323,10 @@ def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     if "rrp" not in df.columns:
         raise RuntimeError("Price (rrp) missing from API response — cannot continue")
 
-    # Resample 5-min → 30-min by flooring timestamps and averaging
-    df["timestamp_30m"] = df["timestamp"].dt.floor("30min")
-    grouped = (
-        df.groupby(["timestamp_30m", "region"])
-          .agg(rrp=("rrp", "mean"), demand=("demand", "mean"))
-          .reset_index()
-          .rename(columns={"timestamp_30m": "timestamp"})
-          .sort_values(["region", "timestamp"])
-          .reset_index(drop=True)
-    )
+    grouped = df.sort_values(["region", "timestamp"]).reset_index(drop=True)
 
-    # Trading period number (1-48 per day, matches AEMO convention)
+    # Trading "period" within the half-hour for reference, not used for binning anymore.
+    # Real AEMO trading interval = 30min, but we keep 5min resolution.
     grouped["period"] = (
         grouped["timestamp"].dt.hour * 2
         + (grouped["timestamp"].dt.minute >= 30).astype(int)
@@ -341,7 +334,6 @@ def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     )
     # Reserve placeholder. Real avail-gen requires DispatchRegionSum (next-day data).
     # Estimate as 1.22× demand + noise so dashboard has a reasonable third series.
-    # If demand is NaN (API failed for it), set both to NaN — dashboard hides empty series.
     has_demand = grouped["demand"].notna()
     noise = np.random.normal(0, 80, len(grouped))
     grouped["avail_gen"] = np.where(has_demand, grouped["demand"] * 1.22 + noise, np.nan)
