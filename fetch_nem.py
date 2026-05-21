@@ -220,47 +220,74 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
         if not price_ok:
             log.error("All price-fetch variants failed.")
 
-        # ---- 2) DEMAND via get_network_data ----
-        if has_data_metric:
-            demand_metric = None
-            for attr in ("DEMAND", "DEMAND_ENERGY", "POWER"):
-                if hasattr(DataMetric, attr):
-                    demand_metric = getattr(DataMetric, attr)
-                    log.info(f"Using DataMetric.{attr} for demand series")
-                    break
+        # ---- 2) DEMAND via get_market (NOT get_network_data) ----
+        # MarketMetric.DEMAND = scheduled regional demand (MW per region: NSW~9k, VIC~6k, etc.)
+        # DataMetric.POWER would have given us total generation by region (much bigger number,
+        # includes interconnector exports — confusing for a demand chart).
+        demand_metric = None
+        for attr in ("DEMAND", "DEMAND_ENERGY"):
+            if hasattr(MarketMetric, attr):
+                demand_metric = getattr(MarketMetric, attr)
+                log.info(f"Using MarketMetric.{attr} for demand series")
+                break
 
-            if demand_metric is not None:
-                demand_attempts = [
-                    dict(
+        if demand_metric is not None:
+            demand_attempts = [
+                dict(
+                    network_code="NEM",
+                    metrics=[demand_metric],
+                    interval=interval,
+                    date_start=start_sydney,
+                    primary_grouping="network_region",
+                ),
+                dict(
+                    network_code="NEM",
+                    metrics=[demand_metric],
+                    interval=interval,
+                    date_start=start_sydney,
+                ),
+            ]
+            for i, kw in enumerate(demand_attempts):
+                try:
+                    demand_rows = _fetch_chunk(client, "get_market", kw, label=f"demand-attempt-{i}")
+                    for r in demand_rows:
+                        r["metric"] = "demand"
+                    rows += demand_rows
+                    log.info(f"Demand fetch succeeded with attempt {i}")
+                    break
+                except Exception as e:
+                    log.warning(f"Demand attempt {i} failed: {e}. Trying next variant…")
+        else:
+            # Fallback: try DataMetric.POWER if MarketMetric.DEMAND doesn't exist in this SDK version
+            log.warning("MarketMetric.DEMAND not found, falling back to DataMetric.POWER (will show generation, not demand)")
+            if has_data_metric and hasattr(DataMetric, "POWER"):
+                try:
+                    demand_rows = _fetch_chunk(client, "get_network_data", dict(
                         network_code="NEM",
-                        metrics=[demand_metric],
+                        metrics=[DataMetric.POWER],
                         interval=interval,
                         date_start=start_sydney,
                         primary_grouping="network_region",
-                    ),
-                    dict(
-                        network_code="NEM",
-                        metrics=[demand_metric],
-                        interval=interval,
-                        date_start=start_sydney,
-                    ),
-                ]
-                for i, kw in enumerate(demand_attempts):
-                    try:
-                        demand_rows = _fetch_chunk(client, "get_network_data", kw, label=f"demand-attempt-{i}")
-                        for r in demand_rows:
-                            r["metric"] = "demand"
-                        rows += demand_rows
-                        log.info(f"Demand fetch succeeded with attempt {i}")
-                        break
-                    except Exception as e:
-                        log.warning(f"Demand attempt {i} failed: {e}. Trying next variant…")
+                    ), label="demand-fallback-power")
+                    for r in demand_rows:
+                        r["metric"] = "demand"
+                    rows += demand_rows
+                except Exception as e:
+                    log.warning(f"Power fallback failed: {e}")
 
     df = pd.DataFrame(rows)
     if df.empty:
         raise RuntimeError("No data returned from OpenElectricity API")
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     df = df.dropna(subset=["region", "value"])
+    # Verification log — proves regions are separate
+    log.info("─── Per-region sanity check (most recent value) ───")
+    for region in sorted(df["region"].unique()):
+        for metric in sorted(df["metric"].unique()):
+            sub = df[(df["region"] == region) & (df["metric"] == metric)]
+            if not sub.empty:
+                latest = sub.sort_values("timestamp").iloc[-1]
+                log.info(f"  {region:5s} {metric:7s}: latest = {latest['value']:>10.2f}  at  {latest['timestamp']}")
     log.info(f"Fetched {len(df):,} rows · regions={sorted(df['region'].unique())} · metrics={sorted(df['metric'].unique())}")
     return df
 
