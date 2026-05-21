@@ -695,6 +695,49 @@
 
 <script>
 // ============================================================
+// TIME HELPERS — NEM market uses AEST (Australia/Sydney)
+// All UI labels show Sydney local time so traders see what NEM sees.
+// ============================================================
+const SYDNEY_FMT_FULL = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Australia/Sydney',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+});
+const SYDNEY_FMT_TIME = new Intl.DateTimeFormat('en-AU', {
+  timeZone: 'Australia/Sydney',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+});
+const SYDNEY_FMT_DATE = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Australia/Sydney',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+});
+
+// Returns "YYYY-MM-DD HH:MM" in Sydney time from any Date or ISO string
+function sydneyStr(dateOrIso) {
+  const d = (dateOrIso instanceof Date) ? dateOrIso : new Date(dateOrIso);
+  const parts = SYDNEY_FMT_FULL.formatToParts(d);
+  const g = (t) => parts.find(p => p.type === t)?.value;
+  return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')}`;
+}
+
+// Just the HH:MM part in Sydney time
+function sydneyTime(dateOrIso) {
+  const d = (dateOrIso instanceof Date) ? dateOrIso : new Date(dateOrIso);
+  return SYDNEY_FMT_TIME.format(d);
+}
+
+// Just YYYY-MM-DD in Sydney time
+function sydneyDate(dateOrIso) {
+  const d = (dateOrIso instanceof Date) ? dateOrIso : new Date(dateOrIso);
+  return SYDNEY_FMT_DATE.format(d);
+}
+
+// "MM-DD HH:MM" in Sydney
+function sydneyShort(dateOrIso) {
+  return sydneyStr(dateOrIso).slice(5);
+}
+
+// ============================================================
 // DATA SYNTHESIS — models real AEMO NEM 30-min patterns
 // (replace with live nemweb feed when CORS proxy available)
 // ============================================================
@@ -772,7 +815,7 @@ function generateRegionData(regionId, days = 30) {
 
     data.push({
       t,
-      settlement: t.toISOString().slice(0, 16).replace('T', ' '),
+      settlement: sydneyStr(t),
       period: ((t.getHours() * 2) + (t.getMinutes() >= 30 ? 1 : 0)) + 1,
       rrp: price,
       demand,
@@ -825,7 +868,7 @@ async function loadLiveData() {
       dataCache[region] = [
         ...rows.map(r => ({
           t: new Date(r.t),
-          settlement: r.t.replace('T', ' ').slice(0, 16),
+          settlement: sydneyStr(r.t),
           period: r.period,
           rrp: r.rrp,
           demand: r.demand,
@@ -835,7 +878,7 @@ async function loadLiveData() {
         })),
         ...fcRows.map(f => ({
           t: new Date(f.timestamp),
-          settlement: f.timestamp.replace('T', ' ').slice(0, 16),
+          settlement: sydneyStr(f.timestamp),
           period: 0,
           rrp: f.pred,
           demand: rows.length ? rows[rows.length - 1].demand : 0,
@@ -931,7 +974,7 @@ function detectAnomalies(data) {
       .map(a => ({
         ...a,
         t: new Date(a.timestamp),
-        settlement: a.timestamp.replace('T', ' ').slice(0, 16),
+        settlement: sydneyStr(a.timestamp),
       }));
     if (filtered.length > 0) return filtered;
   }
@@ -1034,7 +1077,7 @@ function renderPDChart() {
     };
   });
 
-  const labels = [...sliced.map(d => d.settlement.slice(5)), ...forecasts.map(d => d.t.toISOString().slice(5, 16).replace('T', ' '))];
+  const labels = [...sliced.map(d => d.settlement.slice(5)), ...forecasts.map(d => sydneyShort(d.t))];
 
   const ctx = document.getElementById('pdChart').getContext('2d');
   if (pdChart) pdChart.destroy();
@@ -1287,7 +1330,7 @@ function renderForecast() {
     card.innerHTML = `
       <div class="horizon">${h.label}</div>
       <div class="pred" style="color:${priceColor(f.pred)}">$${formatPrice(f.pred)}</div>
-      <div class="conf">${f.t.toISOString().slice(11, 16)} · ±$${(((f.hi - f.lo) / 2)).toFixed(0)}</div>
+      <div class="conf">${sydneyTime(f.t)} · ±$${(((f.hi - f.lo) / 2)).toFixed(0)}</div>
     `;
     sum.appendChild(card);
   });
@@ -1299,7 +1342,7 @@ function renderForecast() {
   forecastChart = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: [...recent.map(d => d.settlement.slice(11)), ...forecasts.map(f => f.t.toISOString().slice(11, 16))],
+      labels: [...recent.map(d => d.settlement.slice(11)), ...forecasts.map(f => sydneyTime(f.t))],
       datasets: [
         {
           label: 'Upper 80%',
