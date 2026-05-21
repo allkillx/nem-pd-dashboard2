@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NEM PD Terminal — 30-min Predispatch Analytics</title>
+<title>NEM Terminal — 5-min Dispatch Analytics</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -572,7 +572,7 @@
     <div class="logo-mark">N</div>
     <div class="brand-text">
       <h1>NEM PD Terminal</h1>
-      <div class="sub">30-min Predispatch · Analytics Console</div>
+      <div class="sub">5-min Dispatch · Analytics Console</div>
     </div>
   </div>
   <div class="ticker-row" id="tickerRow"></div>
@@ -596,10 +596,10 @@
   <div class="control-group">
     <span class="control-label">Range</span>
     <div class="range-tabs" id="rangeTabs">
-      <button class="range-btn" data-range="24">24H</button>
-      <button class="range-btn active" data-range="48">48H</button>
+      <button class="range-btn" data-range="12">12H</button>
+      <button class="range-btn active" data-range="24">24H</button>
+      <button class="range-btn" data-range="48">48H</button>
       <button class="range-btn" data-range="168">7D</button>
-      <button class="range-btn" data-range="720">30D</button>
     </div>
   </div>
   <div class="control-group">
@@ -963,7 +963,7 @@ function detectAnomalies(data) {
 // RENDER
 // ============================================================
 let currentRegion = 'NSW1';
-let currentRange = 48;
+let currentRange = 24;
 let pdChart, forecastChart;
 
 function priceColor(p) {
@@ -1007,7 +1007,15 @@ function renderTickers() {
 function renderPDChart() {
   const fullData = dataCache[currentRegion];
   const history = fullData.filter(d => !d.isFuture);
-  const sliced = history.slice(-currentRange);
+  // currentRange is in HOURS — convert to number of points based on detected interval
+  let intervalMinutes = 30;  // default fallback
+  if (history.length >= 2) {
+    const dt = (history[history.length - 1].t - history[history.length - 2].t) / 60000;
+    if (dt > 0 && dt < 120) intervalMinutes = Math.round(dt);
+  }
+  const pointsPerHour = 60 / intervalMinutes;
+  const numPoints = Math.round(currentRange * pointsPerHour);
+  const sliced = history.slice(-numPoints);
   const futureData = fullData.filter(d => d.isFuture);
   const forecasts = forecastNext24(fullData);
 
@@ -1158,20 +1166,27 @@ function renderPDChart() {
 
 function renderHeatmap() {
   const data = dataCache[currentRegion].filter(d => !d.isFuture);
-  // Last 14 days × 48 intervals
-  const days = 14;
-  const intervals = 48;
-  const recent = data.slice(-days * intervals);
-  // Build 2D matrix [day][interval]
+  // Group by calendar date, then by 30-min bucket within that day (so 5min source data
+  // auto-aggregates to a sensible heatmap resolution).
+  const buckets = {}; // { 'YYYY-MM-DD': { '0': [vals], '1': [vals], ... '47': [vals] } }
+  data.forEach(d => {
+    const dateKey = d.t.toISOString().slice(0, 10);
+    const bucketIdx = d.t.getHours() * 2 + (d.t.getMinutes() >= 30 ? 1 : 0);
+    if (!buckets[dateKey]) buckets[dateKey] = {};
+    if (!buckets[dateKey][bucketIdx]) buckets[dateKey][bucketIdx] = [];
+    buckets[dateKey][bucketIdx].push(d.rrp);
+  });
+
+  const dateKeys = Object.keys(buckets).sort().slice(-14);  // last 14 days
   const matrix = [];
   const labels = [];
-  for (let d = 0; d < days; d++) {
+  const intervals = 48;
+  for (const dateKey of dateKeys) {
+    labels.push(dateKey.slice(5));
     const row = [];
-    const dayData = recent.slice(d * intervals, (d + 1) * intervals);
-    if (dayData.length === 0) continue;
-    labels.push(dayData[0].t.toISOString().slice(5, 10));
     for (let i = 0; i < intervals; i++) {
-      row.push(dayData[i] ? dayData[i].rrp : null);
+      const vals = buckets[dateKey][i];
+      row.push(vals && vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null);
     }
     matrix.push(row);
   }
@@ -1378,11 +1393,23 @@ function renderAll() {
   renderTable();
 }
 
-// Clock
+// Clock — show NEM time (Australia/Sydney) since that's what the market uses,
+// plus UTC for reference.
 function tickClock() {
   const now = new Date();
+  const nemTime = now.toLocaleTimeString('en-AU', {
+    timeZone: 'Australia/Sydney',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const nemDate = now.toLocaleDateString('en-CA', {
+    timeZone: 'Australia/Sydney',
+  }); // YYYY-MM-DD
+  const utcTime = now.toISOString().slice(11, 19);
   document.getElementById('clock').textContent =
-    now.toISOString().slice(0, 10) + ' ' + now.toTimeString().slice(0, 8) + ' UTC';
+    `${nemDate} ${nemTime} AEST · ${utcTime} UTC`;
 }
 setInterval(tickClock, 1000);
 tickClock();
