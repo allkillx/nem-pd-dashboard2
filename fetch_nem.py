@@ -175,8 +175,13 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
         log.warning("DataMetric not available — demand will be unavailable")
 
     # Use SDK pattern that matches official docs: date_start only, no date_end.
-    # Single call (no batching) — 1h × 5 regions × 7 days = 840 points, well within limits.
-    start = datetime.now(timezone.utc) - timedelta(days=days)
+    # CRITICAL: API requires timezone-NAIVE datetime in NETWORK TIME (Sydney for NEM).
+    # If you send UTC with +00:00, the API rejects it with:
+    #   "Date start must be timezone naive and in network time"
+    from zoneinfo import ZoneInfo
+    sydney_tz = ZoneInfo("Australia/Sydney")
+    start_sydney = (datetime.now(sydney_tz) - timedelta(days=days)).replace(tzinfo=None)
+    log.info(f"date_start (Sydney naive) = {start_sydney.isoformat()}")
     rows: list[dict] = []
 
     with OEClient() as client:
@@ -188,7 +193,7 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
                 network_code="NEM",
                 metrics=[MarketMetric.PRICE],
                 interval=interval,
-                date_start=start,
+                date_start=start_sydney,
                 primary_grouping="network_region",
             ),
             # B. without primary_grouping (some SDK versions reject it)
@@ -196,7 +201,7 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
                 network_code="NEM",
                 metrics=[MarketMetric.PRICE],
                 interval=interval,
-                date_start=start,
+                date_start=start_sydney,
             ),
         ]
         price_ok = False
@@ -227,14 +232,14 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
                         network_code="NEM",
                         metrics=[demand_metric],
                         interval=interval,
-                        date_start=start,
+                        date_start=start_sydney,
                         primary_grouping="network_region",
                     ),
                     dict(
                         network_code="NEM",
                         metrics=[demand_metric],
                         interval=interval,
-                        date_start=start,
+                        date_start=start_sydney,
                     ),
                 ]
                 for i, kw in enumerate(demand_attempts):
