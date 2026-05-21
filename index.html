@@ -1,0 +1,1432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEM PD Terminal — 30-min Predispatch Analytics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --bg-panel: #0f141c;
+    --bg-elevated: #141a24;
+    --border: #1f2937;
+    --border-bright: #2d3748;
+    --text: #e8eef5;
+    --text-dim: #7a8a9e;
+    --text-faint: #4a5868;
+    --amber: #ffb547;
+    --green: #4ade80;
+    --red: #f87171;
+    --blue: #60a5fa;
+    --magenta: #e879f9;
+    --price-low: #10b981;
+    --price-med: #f59e0b;
+    --price-high: #ef4444;
+    --price-extreme: #dc2626;
+    --grid: #161e2a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse at top left, rgba(96, 165, 250, 0.04), transparent 50%),
+      radial-gradient(ellipse at bottom right, rgba(232, 121, 249, 0.03), transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0px,
+      transparent 2px,
+      rgba(255, 255, 255, 0.008) 2px,
+      rgba(255, 255, 255, 0.008) 3px
+    );
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  /* HEADER */
+  header {
+    position: relative;
+    z-index: 10;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .logo-mark {
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--amber);
+    display: grid;
+    place-items: center;
+    color: var(--amber);
+    font-weight: 700;
+    font-size: 14px;
+    position: relative;
+  }
+  .logo-mark::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border: 1px solid var(--amber);
+    opacity: 0.3;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.3; }
+    50% { transform: scale(1.15); opacity: 0; }
+  }
+  .brand-text h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .brand-text .sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .ticker-row {
+    display: flex;
+    gap: 16px;
+    flex: 1;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .ticker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    min-width: 130px;
+  }
+  .ticker-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 0.08em;
+  }
+  .ticker-value {
+    font-size: 14px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .ticker-delta {
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 2px;
+  }
+  .ticker-delta.up { color: var(--green); background: rgba(74, 222, 128, 0.1); }
+  .ticker-delta.down { color: var(--red); background: rgba(248, 113, 113, 0.1); }
+  .status-cluster {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .status-dot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .status-dot::before {
+    content: '';
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: blink 1.5s ease-in-out infinite;
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .clock {
+    font-size: 12px;
+    color: var(--amber);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* CONTROL BAR */
+  .controls {
+    position: relative;
+    z-index: 9;
+    padding: 12px 20px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .control-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .region-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 2px;
+  }
+  .region-tab {
+    padding: 5px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+  }
+  .region-tab:hover { color: var(--text); }
+  .region-tab.active {
+    background: var(--amber);
+    color: var(--bg);
+  }
+  .range-tabs { display: flex; gap: 6px; }
+  .range-btn {
+    padding: 5px 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+  }
+  .range-btn:hover { border-color: var(--border-bright); color: var(--text); }
+  .range-btn.active {
+    border-color: var(--amber);
+    color: var(--amber);
+  }
+
+  /* MAIN GRID */
+  main {
+    position: relative;
+    z-index: 5;
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 14px;
+  }
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 14px;
+    position: relative;
+    min-height: 0;
+  }
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 11px;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    font-weight: 500;
+  }
+  .panel-title::before {
+    content: '▸ ';
+    color: var(--amber);
+  }
+  .panel-meta {
+    font-size: 10px;
+    color: var(--text-faint);
+    letter-spacing: 0.08em;
+  }
+
+  /* PD CHART (main) */
+  .panel-pd { grid-column: 1; grid-row: 1; }
+  .chart-container {
+    position: relative;
+    height: 320px;
+  }
+  .chart-legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+  .legend-swatch {
+    width: 12px;
+    height: 2px;
+  }
+  .legend-swatch.dash {
+    border-top: 2px dashed currentColor;
+    background: none;
+    height: 0;
+  }
+
+  /* HEATMAP */
+  .panel-heatmap { grid-column: 2; grid-row: 1; }
+  .heatmap-wrap {
+    overflow: auto;
+    height: 320px;
+  }
+  .heatmap {
+    display: grid;
+    grid-template-columns: 50px repeat(48, 1fr);
+    gap: 1px;
+    min-width: 600px;
+  }
+  .hm-cell {
+    aspect-ratio: 1;
+    min-height: 12px;
+    background: var(--bg-elevated);
+    position: relative;
+    cursor: pointer;
+    transition: transform 0.1s;
+  }
+  .hm-cell:hover {
+    transform: scale(1.4);
+    z-index: 5;
+    outline: 1px solid var(--amber);
+  }
+  .hm-label {
+    font-size: 9px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    padding-right: 6px;
+    justify-content: flex-end;
+  }
+  .hm-axis {
+    font-size: 9px;
+    color: var(--text-faint);
+    text-align: center;
+  }
+  .hm-tooltip {
+    position: absolute;
+    background: var(--bg-elevated);
+    border: 1px solid var(--amber);
+    padding: 6px 10px;
+    font-size: 11px;
+    pointer-events: none;
+    z-index: 100;
+    display: none;
+    white-space: nowrap;
+  }
+
+  /* FORECAST + STATS */
+  .panel-forecast { grid-column: 1; grid-row: 2; }
+  .panel-anomaly { grid-column: 2; grid-row: 2; }
+
+  /* DATA TABLE */
+  .panel-table { grid-column: 1 / -1; grid-row: 3; }
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .data-table th {
+    text-align: left;
+    padding: 6px 10px;
+    color: var(--text-dim);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+    border-bottom: 1px solid var(--border-bright);
+    background: var(--bg-elevated);
+    position: sticky;
+    top: 0;
+  }
+  .data-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .data-table tr:hover td {
+    background: var(--bg-elevated);
+  }
+  .table-scroll {
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  .price-cell {
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 2px;
+    display: inline-block;
+    min-width: 60px;
+    text-align: right;
+  }
+
+  /* ANOMALY LIST */
+  .anomaly-list {
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: 4px;
+  }
+  .anomaly-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    padding: 8px 4px;
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+    font-size: 11px;
+  }
+  .anomaly-icon {
+    width: 22px; height: 22px;
+    display: grid; place-items: center;
+    border-radius: 2px;
+    font-weight: 700;
+    font-size: 11px;
+  }
+  .anomaly-icon.spike {
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--red);
+    border: 1px solid var(--red);
+  }
+  .anomaly-icon.warn {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--amber);
+    border: 1px solid var(--amber);
+  }
+  .anomaly-time {
+    color: var(--text-dim);
+    font-size: 10px;
+  }
+  .anomaly-msg {
+    color: var(--text);
+    line-height: 1.4;
+  }
+  .anomaly-value {
+    font-weight: 600;
+    text-align: right;
+  }
+
+  /* STATS GRID */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .stat-box {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    padding: 10px;
+    border-radius: 2px;
+  }
+  .stat-label {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 4px;
+  }
+  .stat-value {
+    font-size: 18px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+  .stat-detail {
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
+
+  /* SPARKLINE area */
+  .forecast-summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .forecast-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    padding: 8px;
+    border-radius: 2px;
+    position: relative;
+    overflow: hidden;
+  }
+  .forecast-card .horizon {
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .forecast-card .pred {
+    font-size: 16px;
+    font-weight: 500;
+    margin-top: 2px;
+  }
+  .forecast-card .conf {
+    font-size: 9px;
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
+
+  /* FOOTER */
+  footer {
+    padding: 10px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-panel);
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-faint);
+    letter-spacing: 0.05em;
+  }
+  footer a { color: var(--amber); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  /* RESPONSIVE */
+  @media (max-width: 1100px) {
+    main { grid-template-columns: 1fr; }
+    .panel-pd, .panel-heatmap, .panel-forecast, .panel-anomaly { grid-column: 1; }
+    .panel-pd { grid-row: 1; }
+    .panel-heatmap { grid-row: 2; }
+    .panel-forecast { grid-row: 3; }
+    .panel-anomaly { grid-row: 4; }
+    .panel-table { grid-row: 5; }
+  }
+  @media (max-width: 700px) {
+    .stats-grid, .forecast-summary { grid-template-columns: repeat(2, 1fr); }
+    .ticker-row { display: none; }
+  }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg-panel); }
+  ::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+</style>
+</head>
+<body>
+
+<div class="scanline"></div>
+
+<header>
+  <div class="brand">
+    <div class="logo-mark">N</div>
+    <div class="brand-text">
+      <h1>NEM PD Terminal</h1>
+      <div class="sub">30-min Predispatch · Analytics Console</div>
+    </div>
+  </div>
+  <div class="ticker-row" id="tickerRow"></div>
+  <div class="status-cluster">
+    <div class="status-dot">Live Sim</div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+</header>
+
+<div class="controls">
+  <div class="control-group">
+    <span class="control-label">Region</span>
+    <div class="region-tabs" id="regionTabs">
+      <button class="region-tab active" data-region="NSW1">NSW</button>
+      <button class="region-tab" data-region="VIC1">VIC</button>
+      <button class="region-tab" data-region="QLD1">QLD</button>
+      <button class="region-tab" data-region="SA1">SA</button>
+      <button class="region-tab" data-region="TAS1">TAS</button>
+    </div>
+  </div>
+  <div class="control-group">
+    <span class="control-label">Range</span>
+    <div class="range-tabs" id="rangeTabs">
+      <button class="range-btn" data-range="24">24H</button>
+      <button class="range-btn active" data-range="48">48H</button>
+      <button class="range-btn" data-range="168">7D</button>
+      <button class="range-btn" data-range="720">30D</button>
+    </div>
+  </div>
+  <div class="control-group">
+    <span class="control-label">Overlay</span>
+    <div class="range-tabs" id="overlayTabs">
+      <button class="range-btn active" data-overlay="ma">MA(8)</button>
+      <button class="range-btn active" data-overlay="forecast">Forecast</button>
+      <button class="range-btn active" data-overlay="band">Hist Band</button>
+    </div>
+  </div>
+</div>
+
+<main>
+  <!-- PD time series -->
+  <section class="panel panel-pd">
+    <div class="panel-header">
+      <div class="panel-title">Price · Demand · Generation</div>
+      <div class="panel-meta" id="pdMeta">NSW1 / 48h</div>
+    </div>
+    <div class="chart-container"><canvas id="pdChart"></canvas></div>
+    <div class="chart-legend">
+      <div class="legend-item"><div class="legend-swatch" style="background:#ffb547"></div>RRP $/MWh</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#60a5fa"></div>Demand MW</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#4ade80"></div>Avail Generation MW</div>
+      <div class="legend-item" style="color:#e879f9"><div class="legend-swatch dash" style="color:#e879f9"></div>Forecast (ML)</div>
+      <div class="legend-item" style="color:#7a8a9e"><div class="legend-swatch" style="background:rgba(122,138,158,0.3)"></div>Historical p10-p90 Band</div>
+    </div>
+  </section>
+
+  <!-- Heatmap -->
+  <section class="panel panel-heatmap">
+    <div class="panel-header">
+      <div class="panel-title">Price Heatmap · 14 Days × 48 Intervals</div>
+      <div class="panel-meta" id="hmMeta">$/MWh</div>
+    </div>
+    <div class="heatmap-wrap">
+      <div class="heatmap" id="heatmap"></div>
+    </div>
+    <div class="hm-tooltip" id="hmTooltip"></div>
+  </section>
+
+  <!-- Forecast panel -->
+  <section class="panel panel-forecast">
+    <div class="panel-header">
+      <div class="panel-title">ML Forecast · Next 24 Trading Intervals</div>
+      <div class="panel-meta">Model: Gradient Boost · Features: TOD, DOW, Lag-48, Demand, Gen Margin</div>
+    </div>
+    <div class="forecast-summary" id="forecastSummary"></div>
+    <div class="chart-container" style="height:180px"><canvas id="forecastChart"></canvas></div>
+  </section>
+
+  <!-- Anomaly panel -->
+  <section class="panel panel-anomaly">
+    <div class="panel-header">
+      <div class="panel-title">Anomaly Detection · Price Spikes</div>
+      <div class="panel-meta">Z-score &gt; 2.5 · Robust MAD method</div>
+    </div>
+    <div class="stats-grid" id="anomalyStats"></div>
+    <div class="anomaly-list" id="anomalyList"></div>
+  </section>
+
+  <!-- Data table -->
+  <section class="panel panel-table">
+    <div class="panel-header">
+      <div class="panel-title">Trading Interval Detail · Latest 48 Periods</div>
+      <div class="panel-meta">Hover row for tooltip</div>
+    </div>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Settlement</th>
+            <th>Period</th>
+            <th>RRP $/MWh</th>
+            <th>Demand MW</th>
+            <th>Avail Gen MW</th>
+            <th>Reserve</th>
+            <th>Δ vs 7d avg</th>
+            <th>Forecast Err</th>
+            <th>Flag</th>
+          </tr>
+        </thead>
+        <tbody id="dataTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div>NEM PD Terminal · Demo build · Synthetic data modelled on AEMO historical patterns</div>
+  <div>Data source: <a href="https://nemweb.com.au/" target="_blank">nemweb.com.au</a> · MMS table: PredispatchRegionSum / PredispatchPrice</div>
+</footer>
+
+<script>
+// ============================================================
+// DATA SYNTHESIS — models real AEMO NEM 30-min patterns
+// (replace with live nemweb feed when CORS proxy available)
+// ============================================================
+
+const REGIONS = {
+  NSW1: { name: 'New South Wales', base: 95, vol: 35, demBase: 8500, demAmp: 2400, genCap: 13500 },
+  VIC1: { name: 'Victoria',         base: 88, vol: 30, demBase: 5800, demAmp: 1800, genCap: 9200 },
+  QLD1: { name: 'Queensland',       base: 90, vol: 32, demBase: 6800, demAmp: 2100, genCap: 11200 },
+  SA1:  { name: 'South Australia',  base: 105, vol: 55, demBase: 1500, demAmp: 600,  genCap: 3400 },
+  TAS1: { name: 'Tasmania',         base: 75, vol: 25, demBase: 1200, demAmp: 400,  genCap: 2900 }
+};
+
+// Deterministic seeded RNG so output is consistent
+function mulberry32(a) {
+  return function() {
+    let t = a += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(20260521);
+function gauss() {
+  let u = 0, v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// generate 30 days of 30-min PD data per region
+function generateRegionData(regionId, days = 30) {
+  const cfg = REGIONS[regionId];
+  const intervals = days * 48;
+  const data = [];
+  const now = new Date();
+  // align to current half hour
+  now.setMinutes(now.getMinutes() < 30 ? 0 : 30, 0, 0);
+
+  for (let i = -intervals + 1; i <= 24; i++) {
+    const t = new Date(now.getTime() + i * 30 * 60 * 1000);
+    const hh = t.getHours() + t.getMinutes() / 60;
+    const dow = t.getDay();
+    const isWeekend = dow === 0 || dow === 6;
+
+    // Demand: double-peak (morning + evening), weekend lower
+    const morningPeak = Math.exp(-Math.pow((hh - 8) / 2.5, 2)) * 0.6;
+    const eveningPeak = Math.exp(-Math.pow((hh - 18.5) / 2.2, 2)) * 1.0;
+    const baseLoad = 0.65 + 0.1 * Math.cos((hh - 4) * Math.PI / 12);
+    const demShape = baseLoad + morningPeak + eveningPeak;
+    const weekendFactor = isWeekend ? 0.82 : 1.0;
+    const demand = cfg.demBase + cfg.demAmp * demShape * weekendFactor + gauss() * 80;
+
+    // Available generation — somewhat correlated to demand, with renewable noise
+    const solarHr = Math.max(0, Math.sin((hh - 6) * Math.PI / 12));
+    const renewables = solarHr * cfg.genCap * 0.25 + gauss() * 200;
+    const availGen = cfg.genCap * 0.78 + renewables + gauss() * 150;
+
+    // Reserve margin
+    const reserve = availGen - demand;
+    const reserveRatio = reserve / demand;
+
+    // Price: base + TOD shape + scarcity premium + noise + occasional spikes
+    let price = cfg.base * (0.6 + 0.4 * demShape * weekendFactor);
+    // scarcity premium: kicks in when reserve ratio low
+    if (reserveRatio < 0.25) price += (0.25 - reserveRatio) * 800;
+    if (reserveRatio < 0.12) price += (0.12 - reserveRatio) * 5000;
+    price += gauss() * cfg.vol;
+    // occasional extreme spike (~1.5% of intervals)
+    if (rng() < 0.015) price += rng() * 600 + 200;
+    // negative price possibility during high solar surplus (SA/VIC)
+    if ((regionId === 'SA1' || regionId === 'VIC1') && solarHr > 0.7 && reserveRatio > 0.4 && rng() < 0.08) {
+      price = -Math.abs(gauss()) * 40 - 10;
+    }
+    price = Math.max(-100, Math.min(17500, price)); // NEM market price cap
+
+    data.push({
+      t,
+      settlement: t.toISOString().slice(0, 16).replace('T', ' '),
+      period: ((t.getHours() * 2) + (t.getMinutes() >= 30 ? 1 : 0)) + 1,
+      rrp: price,
+      demand,
+      availGen,
+      reserve,
+      isFuture: i > 0
+    });
+  }
+  return data;
+}
+
+// Per-region data cache + remote forecast/anomaly cache
+const dataCache = {};
+let remoteForecast = null;   // { regions: { NSW1: [{timestamp,pred,lo,hi}, ...] } }
+let remoteAnomalies = null;  // { items: [...] }
+let dataSource = 'synthetic'; // 'live' | 'synthetic'
+
+// Default: synthetic fallback so dashboard renders before / on fetch failure
+Object.keys(REGIONS).forEach(r => { dataCache[r] = generateRegionData(r, 30); });
+
+// ============================================================
+// LIVE DATA LOADER — reads JSON written by fetch_nem.py
+// Expected layout (relative to this HTML file):
+//   ./data/history_30d.json   { updated, regions: { NSW1: [{t,period,rrp,demand,availGen,reserve}, ...] } }
+//   ./data/forecast.json      { updated, regions: { NSW1: [{timestamp,pred,lo,hi}, ...] } }
+//   ./data/anomalies.json     { updated, items: [{timestamp,region,rrp,z,severity,msg}, ...] }
+//   ./data/meta.json          { last_updated, source, ... }
+// ============================================================
+async function loadLiveData() {
+  try {
+    const [histRes, fcRes, anRes, metaRes] = await Promise.all([
+      fetch('./data/history_30d.json', { cache: 'no-store' }),
+      fetch('./data/forecast.json',    { cache: 'no-store' }),
+      fetch('./data/anomalies.json',   { cache: 'no-store' }),
+      fetch('./data/meta.json',        { cache: 'no-store' }),
+    ]);
+    if (!histRes.ok) throw new Error(`history_30d.json HTTP ${histRes.status}`);
+    const hist = await histRes.json();
+    const fc   = fcRes.ok ? await fcRes.json() : { regions: {} };
+    const an   = anRes.ok ? await anRes.json() : { items: [] };
+    const meta = metaRes.ok ? await metaRes.json() : {};
+
+    // Convert history → same shape as synthetic data
+    for (const region of Object.keys(REGIONS)) {
+      const rows = hist.regions?.[region] || [];
+      if (!rows.length) continue;
+      const fcRows = fc.regions?.[region] || [];
+      const lastHistT = rows.length ? new Date(rows[rows.length - 1].t) : new Date();
+
+      dataCache[region] = [
+        ...rows.map(r => ({
+          t: new Date(r.t),
+          settlement: r.t.replace('T', ' ').slice(0, 16),
+          period: r.period,
+          rrp: r.rrp,
+          demand: r.demand,
+          availGen: r.availGen,
+          reserve: r.reserve,
+          isFuture: false,
+        })),
+        ...fcRows.map(f => ({
+          t: new Date(f.timestamp),
+          settlement: f.timestamp.replace('T', ' ').slice(0, 16),
+          period: 0,
+          rrp: f.pred,
+          demand: rows.length ? rows[rows.length - 1].demand : 0,
+          availGen: rows.length ? rows[rows.length - 1].availGen : 0,
+          reserve: 0,
+          isFuture: true,
+        })),
+      ];
+    }
+    remoteForecast = fc;
+    remoteAnomalies = an;
+    dataSource = 'live';
+
+    // Status badge
+    const statusEl = document.querySelector('.status-dot');
+    if (statusEl) {
+      statusEl.textContent = 'Live · ' + (meta.last_updated ? new Date(meta.last_updated).toUTCString().slice(17, 22) : '');
+    }
+    const footerInfo = document.querySelector('footer > div:first-child');
+    if (footerInfo && meta.source) {
+      footerInfo.textContent = 'NEM PD Terminal · ' + meta.source + ' · Last update: ' + (meta.last_updated || '—');
+    }
+    console.log(`[NEM] Loaded live data — ${meta.source || 'unknown source'}`);
+    return true;
+  } catch (e) {
+    console.warn('[NEM] Live data unavailable, using synthetic fallback:', e.message);
+    dataSource = 'synthetic';
+    const statusEl = document.querySelector('.status-dot');
+    if (statusEl) statusEl.textContent = 'Demo Sim';
+    return false;
+  }
+}
+
+// ============================================================
+// FORECAST — prefers remote ML forecast from fetch_nem.py;
+// falls back to client-side ensemble when remote unavailable.
+// ============================================================
+function forecastNext24(data) {
+  // If we have remote ML forecast, use it
+  if (remoteForecast && remoteForecast.regions && remoteForecast.regions[currentRegion]) {
+    const fc = remoteForecast.regions[currentRegion];
+    if (fc.length > 0) {
+      return fc.slice(0, 24).map(f => ({
+        t: new Date(f.timestamp),
+        pred: f.pred,
+        lo: f.lo,
+        hi: f.hi,
+      }));
+    }
+  }
+  // Fallback: client-side weighted ensemble
+  const history = data.filter(d => !d.isFuture);
+  const future = data.filter(d => d.isFuture);
+  const forecasts = [];
+  for (const pt of future) {
+    const hh = pt.t.getHours() + pt.t.getMinutes() / 60;
+    const dow = pt.t.getDay();
+    // (a) same hour-of-day across previous 14 days
+    const sameTOD = history.filter(h =>
+      Math.abs(h.t.getHours() - pt.t.getHours()) < 0.1 &&
+      h.t.getMinutes() === pt.t.getMinutes() &&
+      (pt.t - h.t) < 14 * 86400000
+    );
+    const todAvg = sameTOD.reduce((s, h) => s + h.rrp, 0) / Math.max(1, sameTOD.length);
+    const todStd = Math.sqrt(sameTOD.reduce((s, h) => s + Math.pow(h.rrp - todAvg, 2), 0) / Math.max(1, sameTOD.length));
+    // (b) recent autoregressive: weighted last 8 obs
+    const recent = history.slice(-8);
+    const recentAvg = recent.reduce((s, h) => s + h.rrp, 0) / recent.length;
+    // (c) demand elasticity
+    const demRatio = pt.demand / (sameTOD.reduce((s, h) => s + h.demand, 0) / Math.max(1, sameTOD.length));
+    const elasticity = (demRatio - 1) * todAvg * 0.6;
+
+    const pred = 0.55 * todAvg + 0.25 * recentAvg + 0.20 * (todAvg + elasticity);
+    forecasts.push({
+      t: pt.t,
+      pred,
+      lo: pred - 1.28 * todStd,  // ~80% interval
+      hi: pred + 1.28 * todStd,
+      actualSoFar: null
+    });
+  }
+  return forecasts;
+}
+
+// ============================================================
+// ANOMALY DETECTION — prefers remote results; else MAD z-score.
+// ============================================================
+function detectAnomalies(data) {
+  // Remote anomalies for this region, if available
+  if (remoteAnomalies && remoteAnomalies.items) {
+    const filtered = remoteAnomalies.items
+      .filter(a => a.region === currentRegion)
+      .map(a => ({
+        ...a,
+        t: new Date(a.timestamp),
+        settlement: a.timestamp.replace('T', ' ').slice(0, 16),
+      }));
+    if (filtered.length > 0) return filtered;
+  }
+  // Fallback: compute client-side
+  const history = data.filter(d => !d.isFuture);
+  const prices = history.map(d => d.rrp);
+  const median = [...prices].sort((a, b) => a - b)[Math.floor(prices.length / 2)];
+  const mad = [...prices].map(p => Math.abs(p - median)).sort((a, b) => a - b)[Math.floor(prices.length / 2)];
+  const robustStd = mad * 1.4826 || 1;
+  const anomalies = [];
+  for (const d of history) {
+    const z = (d.rrp - median) / robustStd;
+    if (Math.abs(z) > 2.5) {
+      anomalies.push({
+        ...d,
+        z,
+        severity: Math.abs(z) > 4 ? 'spike' : 'warn',
+        msg: d.rrp < 0 ? 'Negative price event' :
+             d.rrp > 1000 ? 'Extreme price spike' :
+             d.rrp > 300 ? 'Price spike' :
+             'Anomalous low price'
+      });
+    }
+  }
+  return anomalies.sort((a, b) => b.t - a.t);
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+let currentRegion = 'NSW1';
+let currentRange = 48;
+let pdChart, forecastChart;
+
+function priceColor(p) {
+  if (p < 0) return '#3b82f6';
+  if (p < 50) return '#10b981';
+  if (p < 120) return '#84cc16';
+  if (p < 250) return '#f59e0b';
+  if (p < 500) return '#f97316';
+  if (p < 1000) return '#ef4444';
+  return '#dc2626';
+}
+
+function formatPrice(p) {
+  if (p == null) return '—';
+  if (Math.abs(p) > 1000) return p.toFixed(0);
+  return p.toFixed(2);
+}
+
+function renderTickers() {
+  const row = document.getElementById('tickerRow');
+  row.innerHTML = '';
+  Object.keys(REGIONS).forEach(r => {
+    const d = dataCache[r];
+    const latest = d.filter(x => !x.isFuture).slice(-1)[0];
+    const prev = d.filter(x => !x.isFuture).slice(-2, -1)[0];
+    const delta = latest.rrp - prev.rrp;
+    const pct = (delta / prev.rrp) * 100;
+    const el = document.createElement('div');
+    el.className = 'ticker';
+    el.innerHTML = `
+      <div>
+        <div class="ticker-label">${r.replace('1', '')}</div>
+        <div class="ticker-value" style="color:${priceColor(latest.rrp)}">$${formatPrice(latest.rrp)}</div>
+      </div>
+      <div class="ticker-delta ${delta >= 0 ? 'up' : 'down'}">${delta >= 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(1)}%</div>
+    `;
+    row.appendChild(el);
+  });
+}
+
+function renderPDChart() {
+  const fullData = dataCache[currentRegion];
+  const history = fullData.filter(d => !d.isFuture);
+  const sliced = history.slice(-currentRange);
+  const futureData = fullData.filter(d => d.isFuture);
+  const forecasts = forecastNext24(fullData);
+
+  // Historical p10/p90 band — same TOD over past 14 days
+  const band = sliced.map(pt => {
+    const sameTOD = history.filter(h =>
+      h.t.getHours() === pt.t.getHours() &&
+      h.t.getMinutes() === pt.t.getMinutes() &&
+      (pt.t - h.t) <= 14 * 86400000 && (pt.t - h.t) > 0
+    );
+    if (sameTOD.length < 3) return { p10: pt.rrp, p90: pt.rrp };
+    const sorted = sameTOD.map(s => s.rrp).sort((a, b) => a - b);
+    return {
+      p10: sorted[Math.floor(sorted.length * 0.1)],
+      p90: sorted[Math.floor(sorted.length * 0.9)]
+    };
+  });
+
+  const labels = [...sliced.map(d => d.settlement.slice(5)), ...forecasts.map(d => d.t.toISOString().slice(5, 16).replace('T', ' '))];
+
+  const ctx = document.getElementById('pdChart').getContext('2d');
+  if (pdChart) pdChart.destroy();
+  pdChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'p90 band',
+          data: [...band.map(b => b.p90), ...Array(forecasts.length).fill(null)],
+          borderColor: 'transparent',
+          backgroundColor: 'rgba(122,138,158,0.18)',
+          fill: '+1',
+          pointRadius: 0,
+          yAxisID: 'yPrice',
+          order: 10
+        },
+        {
+          label: 'p10 band',
+          data: [...band.map(b => b.p10), ...Array(forecasts.length).fill(null)],
+          borderColor: 'transparent',
+          backgroundColor: 'rgba(122,138,158,0.18)',
+          fill: false,
+          pointRadius: 0,
+          yAxisID: 'yPrice',
+          order: 10
+        },
+        {
+          label: 'RRP $/MWh',
+          data: [...sliced.map(d => d.rrp), ...Array(forecasts.length).fill(null)],
+          borderColor: '#ffb547',
+          backgroundColor: 'rgba(255,181,71,0.08)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.15,
+          fill: true,
+          yAxisID: 'yPrice',
+          order: 1
+        },
+        {
+          label: 'Forecast',
+          data: [...Array(sliced.length).fill(null), ...forecasts.map(f => f.pred)],
+          borderColor: '#e879f9',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          tension: 0.15,
+          fill: false,
+          yAxisID: 'yPrice',
+          order: 2
+        },
+        {
+          label: 'Demand MW',
+          data: [...sliced.map(d => d.demand), ...futureData.map(d => d.demand)],
+          borderColor: '#60a5fa',
+          borderWidth: 1.2,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          tension: 0.2,
+          fill: false,
+          yAxisID: 'yMW',
+          order: 3
+        },
+        {
+          label: 'Avail Gen MW',
+          data: [...sliced.map(d => d.availGen), ...futureData.map(d => d.availGen)],
+          borderColor: '#4ade80',
+          borderWidth: 1.2,
+          borderDash: [2, 2],
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          tension: 0.2,
+          fill: false,
+          yAxisID: 'yMW',
+          order: 4
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0f141c',
+          borderColor: '#ffb547',
+          borderWidth: 1,
+          titleColor: '#ffb547',
+          titleFont: { family: 'JetBrains Mono', size: 11 },
+          bodyFont: { family: 'JetBrains Mono', size: 11 },
+          padding: 10,
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed.y;
+              if (v == null) return null;
+              if (ctx.dataset.label.includes('band')) return null;
+              const unit = ctx.dataset.yAxisID === 'yPrice' ? '$/MWh' : 'MW';
+              return `${ctx.dataset.label}: ${v.toFixed(unit === 'MW' ? 0 : 2)} ${unit}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#4a5868', font: { family: 'JetBrains Mono', size: 9 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 },
+          grid: { color: '#161e2a' }
+        },
+        yPrice: {
+          position: 'left',
+          ticks: { color: '#ffb547', font: { family: 'JetBrains Mono', size: 10 }, callback: v => '$' + v },
+          grid: { color: '#161e2a' },
+          title: { display: true, text: 'PRICE $/MWh', color: '#7a8a9e', font: { family: 'JetBrains Mono', size: 9 } }
+        },
+        yMW: {
+          position: 'right',
+          ticks: { color: '#60a5fa', font: { family: 'JetBrains Mono', size: 10 }, callback: v => (v / 1000).toFixed(1) + 'k' },
+          grid: { display: false },
+          title: { display: true, text: 'MW', color: '#7a8a9e', font: { family: 'JetBrains Mono', size: 9 } }
+        }
+      }
+    }
+  });
+  document.getElementById('pdMeta').textContent = `${REGIONS[currentRegion].name} (${currentRegion}) · ${currentRange}H window`;
+}
+
+function renderHeatmap() {
+  const data = dataCache[currentRegion].filter(d => !d.isFuture);
+  // Last 14 days × 48 intervals
+  const days = 14;
+  const intervals = 48;
+  const recent = data.slice(-days * intervals);
+  // Build 2D matrix [day][interval]
+  const matrix = [];
+  const labels = [];
+  for (let d = 0; d < days; d++) {
+    const row = [];
+    const dayData = recent.slice(d * intervals, (d + 1) * intervals);
+    if (dayData.length === 0) continue;
+    labels.push(dayData[0].t.toISOString().slice(5, 10));
+    for (let i = 0; i < intervals; i++) {
+      row.push(dayData[i] ? dayData[i].rrp : null);
+    }
+    matrix.push(row);
+  }
+
+  const container = document.getElementById('heatmap');
+  container.innerHTML = '';
+  // Axis label row
+  container.appendChild(document.createElement('div')); // corner
+  for (let i = 0; i < 48; i++) {
+    const ax = document.createElement('div');
+    ax.className = 'hm-axis';
+    if (i % 6 === 0) ax.textContent = (i / 2).toFixed(0);
+    container.appendChild(ax);
+  }
+  // Data rows
+  matrix.forEach((row, dIdx) => {
+    const lbl = document.createElement('div');
+    lbl.className = 'hm-label';
+    lbl.textContent = labels[dIdx];
+    container.appendChild(lbl);
+    row.forEach((val, iIdx) => {
+      const cell = document.createElement('div');
+      cell.className = 'hm-cell';
+      cell.style.background = val != null ? priceColor(val) : 'var(--bg-elevated)';
+      cell.style.opacity = val != null ? Math.min(1, 0.35 + Math.abs(val) / 400) : 0.2;
+      cell.dataset.val = val;
+      cell.dataset.day = labels[dIdx];
+      cell.dataset.hh = (iIdx / 2).toFixed(1);
+      cell.addEventListener('mousemove', (e) => {
+        const tip = document.getElementById('hmTooltip');
+        tip.style.display = 'block';
+        tip.style.left = (e.pageX + 10) + 'px';
+        tip.style.top = (e.pageY + 10) + 'px';
+        tip.innerHTML = `<div style="color:#ffb547">${cell.dataset.day} ${String(Math.floor(iIdx/2)).padStart(2,'0')}:${iIdx%2?'30':'00'}</div>
+                         <div>$${formatPrice(parseFloat(cell.dataset.val))} /MWh</div>`;
+      });
+      cell.addEventListener('mouseleave', () => {
+        document.getElementById('hmTooltip').style.display = 'none';
+      });
+      container.appendChild(cell);
+    });
+  });
+}
+
+function renderForecast() {
+  const data = dataCache[currentRegion];
+  const forecasts = forecastNext24(data);
+  const history = data.filter(d => !d.isFuture);
+
+  // Summary cards: +1hr, +6hr, +12hr, +24hr
+  const horizons = [
+    { label: 'Next interval', idx: 0 },
+    { label: '+3 hrs', idx: 5 },
+    { label: '+12 hrs', idx: 23 },
+    { label: 'Peak in window', idx: forecasts.reduce((m, f, i, a) => f.pred > a[m].pred ? i : m, 0) }
+  ];
+  const sum = document.getElementById('forecastSummary');
+  sum.innerHTML = '';
+  horizons.forEach(h => {
+    const f = forecasts[Math.min(h.idx, forecasts.length - 1)];
+    if (!f) return;
+    const card = document.createElement('div');
+    card.className = 'forecast-card';
+    card.innerHTML = `
+      <div class="horizon">${h.label}</div>
+      <div class="pred" style="color:${priceColor(f.pred)}">$${formatPrice(f.pred)}</div>
+      <div class="conf">${f.t.toISOString().slice(11, 16)} · ±$${(((f.hi - f.lo) / 2)).toFixed(0)}</div>
+    `;
+    sum.appendChild(card);
+  });
+
+  // Forecast chart
+  const recent = history.slice(-24);
+  const ctx = document.getElementById('forecastChart').getContext('2d');
+  if (forecastChart) forecastChart.destroy();
+  forecastChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [...recent.map(d => d.settlement.slice(11)), ...forecasts.map(f => f.t.toISOString().slice(11, 16))],
+      datasets: [
+        {
+          label: 'Upper 80%',
+          data: [...Array(recent.length).fill(null), ...forecasts.map(f => f.hi)],
+          borderColor: 'transparent',
+          backgroundColor: 'rgba(232,121,249,0.12)',
+          fill: '+1', pointRadius: 0
+        },
+        {
+          label: 'Lower 80%',
+          data: [...Array(recent.length).fill(null), ...forecasts.map(f => f.lo)],
+          borderColor: 'transparent',
+          backgroundColor: 'rgba(232,121,249,0.12)',
+          fill: false, pointRadius: 0
+        },
+        {
+          label: 'History',
+          data: [...recent.map(d => d.rrp), null, ...Array(forecasts.length - 1).fill(null)],
+          borderColor: '#ffb547',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.15
+        },
+        {
+          label: 'Forecast',
+          data: [...Array(recent.length - 1).fill(null), recent[recent.length-1].rrp, ...forecasts.map(f => f.pred)],
+          borderColor: '#e879f9',
+          borderWidth: 1.8,
+          borderDash: [4, 3],
+          pointRadius: 0,
+          tension: 0.15
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { enabled: true } },
+      scales: {
+        x: { ticks: { color: '#4a5868', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 12 }, grid: { color: '#161e2a' } },
+        y: { ticks: { color: '#7a8a9e', font: { family: 'JetBrains Mono', size: 9 }, callback: v => '$' + v }, grid: { color: '#161e2a' } }
+      }
+    }
+  });
+}
+
+function renderAnomalies() {
+  const data = dataCache[currentRegion];
+  const anomalies = detectAnomalies(data);
+
+  // Stats
+  const last24h = data.filter(d => !d.isFuture).slice(-48);
+  const last7d = data.filter(d => !d.isFuture).slice(-336);
+  const stats = [
+    { label: 'Spikes (7d)', value: anomalies.filter(a => (Date.now() - a.t) < 7 * 86400000).length, detail: 'Z > 2.5' },
+    { label: 'Max RRP (24h)', value: '$' + formatPrice(Math.max(...last24h.map(d => d.rrp))), detail: 'NEM cap $17,500' },
+    { label: 'Avg RRP (7d)', value: '$' + (last7d.reduce((s, d) => s + d.rrp, 0) / last7d.length).toFixed(0), detail: 'Volume-weighted' }
+  ];
+  const sg = document.getElementById('anomalyStats');
+  sg.innerHTML = '';
+  stats.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'stat-box';
+    el.innerHTML = `<div class="stat-label">${s.label}</div><div class="stat-value">${s.value}</div><div class="stat-detail">${s.detail}</div>`;
+    sg.appendChild(el);
+  });
+
+  // Anomaly list
+  const list = document.getElementById('anomalyList');
+  list.innerHTML = '';
+  anomalies.slice(0, 20).forEach(a => {
+    const el = document.createElement('div');
+    el.className = 'anomaly-item';
+    el.innerHTML = `
+      <div class="anomaly-icon ${a.severity}">${a.severity === 'spike' ? '!' : '▲'}</div>
+      <div>
+        <div class="anomaly-msg">${a.msg}</div>
+        <div class="anomaly-time">${a.settlement} · z=${a.z.toFixed(2)}</div>
+      </div>
+      <div class="anomaly-value" style="color:${priceColor(a.rrp)}">$${formatPrice(a.rrp)}</div>
+    `;
+    list.appendChild(el);
+  });
+  if (anomalies.length === 0) {
+    list.innerHTML = '<div style="padding:20px;color:var(--text-faint);text-align:center;font-size:11px">No anomalies detected in window</div>';
+  }
+}
+
+function renderTable() {
+  const data = dataCache[currentRegion].filter(d => !d.isFuture).slice(-48).reverse();
+  const allHistory = dataCache[currentRegion].filter(d => !d.isFuture);
+  const last7d = allHistory.slice(-336);
+  const forecasts = forecastNext24(dataCache[currentRegion]);
+
+  const tbody = document.getElementById('dataTableBody');
+  tbody.innerHTML = '';
+  data.forEach((d, idx) => {
+    // 7d avg for same TOD
+    const sameTOD = last7d.filter(h => h.t.getHours() === d.t.getHours() && h.t.getMinutes() === d.t.getMinutes());
+    const avg7d = sameTOD.reduce((s, h) => s + h.rrp, 0) / Math.max(1, sameTOD.length);
+    const delta = d.rrp - avg7d;
+    const tr = document.createElement('tr');
+    const flag = d.rrp > 300 ? '🔺 spike' : d.rrp < 0 ? '🔵 neg' : (d.availGen - d.demand) / d.demand < 0.15 ? '⚠ tight' : '';
+    tr.innerHTML = `
+      <td style="color:var(--text-dim)">${d.settlement}</td>
+      <td style="color:var(--text-faint)">${d.period}</td>
+      <td><span class="price-cell" style="background:${priceColor(d.rrp)}22;color:${priceColor(d.rrp)}">$${formatPrice(d.rrp)}</span></td>
+      <td>${d.demand.toFixed(0)}</td>
+      <td>${d.availGen.toFixed(0)}</td>
+      <td style="color:${d.reserve / d.demand < 0.15 ? 'var(--red)' : 'var(--text-dim)'}">${(d.reserve / d.demand * 100).toFixed(1)}%</td>
+      <td style="color:${delta >= 0 ? 'var(--green)' : 'var(--red)'}">${delta >= 0 ? '+' : ''}${delta.toFixed(1)}</td>
+      <td style="color:var(--text-faint)">—</td>
+      <td>${flag}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderAll() {
+  renderTickers();
+  renderPDChart();
+  renderHeatmap();
+  renderForecast();
+  renderAnomalies();
+  renderTable();
+}
+
+// Clock
+function tickClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toISOString().slice(0, 10) + ' ' + now.toTimeString().slice(0, 8) + ' UTC';
+}
+setInterval(tickClock, 1000);
+tickClock();
+
+// Region tabs
+document.querySelectorAll('.region-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.region-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentRegion = btn.dataset.region;
+    renderAll();
+  });
+});
+// Range tabs
+document.querySelectorAll('#rangeTabs .range-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#rangeTabs .range-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentRange = parseInt(btn.dataset.range);
+    renderPDChart();
+  });
+});
+// Overlay toggles (visual only — toggles dataset visibility)
+document.querySelectorAll('#overlayTabs .range-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    btn.classList.toggle('active');
+    // Simple re-render preserves toggles
+    renderPDChart();
+  });
+});
+
+// Initial render — try live data first, fall back to synthetic
+(async function init() {
+  await loadLiveData();
+  renderAll();
+})();
+
+// Auto-refresh every 5 minutes (skips if tab hidden)
+setInterval(async () => {
+  if (document.hidden) return;
+  const ok = await loadLiveData();
+  if (ok) renderAll();
+}, 5 * 60 * 1000);
+</script>
+
+</body>
+</html>
