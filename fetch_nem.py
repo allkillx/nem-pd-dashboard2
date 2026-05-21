@@ -88,7 +88,6 @@ def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
     try:
         response = fn(**kwargs)
     except Exception as e:
-        # Pull out the full error body if the SDK attached it
         body = getattr(e, "response", None) or getattr(e, "body", None) or getattr(e, "detail", None)
         log.error(f"[{label}] {fn_name} call FAILED. args={kwargs}")
         log.error(f"[{label}] exception type={type(e).__name__} repr={e!r}")
@@ -98,11 +97,20 @@ def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
     rows: list[dict] = []
     for ts in response.data:
         metric_name = str(ts.metric).split(".")[-1].lower()
+        unit = getattr(ts, "unit", None)
+        # IMPORTANT: log the unit so we can spot energy-vs-power confusion
+        log.info(f"[{label}] series metric={metric_name} unit={unit!r} results={len(ts.results)}")
         for result in ts.results:
             region = _extract_region(result)
             if not region:
                 log.warning(f"[{label}] could not resolve region for result name={result.name!r}")
                 continue
+            n_pts = len(result.data) if result.data else 0
+            if n_pts > 0:
+                # Show one sample data point so we can sanity-check magnitudes
+                sample = result.data[0]
+                sample_val = getattr(sample, "value", None)
+                log.info(f"[{label}]   region={region} n={n_pts} first_value={sample_val}")
             for dp in result.data:
                 rows.append({
                     "timestamp": dp.timestamp,
@@ -149,7 +157,7 @@ def _probe_api(client) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
+def fetch_market_data(days: float = 7, interval: str = "1h") -> pd.DataFrame:
     """
     Fetch hourly price + demand for all NEM regions over `days` days.
 
@@ -294,9 +302,9 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
 
 def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     """
-    Pivot long-form metric rows into wide table (one row per timestamp×region).
-    Despite the name, this works for any interval (1h, 5m, etc.) — the data
-    is already at the API's native interval; this is just a reshape.
+    Pivot long-form 5-min rows to wide table, then resample to 30-min trading intervals.
+    Price: time-weighted average over the 6 5-min intervals (mean = same here since equal spacing).
+    Demand: average MW over the 30-min window.
 
     Returns DataFrame with columns:
       timestamp, region, rrp, demand, avail_gen, reserve, period
@@ -309,15 +317,23 @@ def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     ).reset_index()
     df = df.rename(columns={"price": "rrp"})
 
-    # Demand may be missing if the API call failed for it — fill with NaN column
     if "demand" not in df.columns:
         df["demand"] = float("nan")
     if "rrp" not in df.columns:
         raise RuntimeError("Price (rrp) missing from API response — cannot continue")
 
-    grouped = df.rename(columns={"timestamp": "timestamp"}).sort_values(["region", "timestamp"]).reset_index(drop=True)
+    # Resample 5-min → 30-min by flooring timestamps and averaging
+    df["timestamp_30m"] = df["timestamp"].dt.floor("30min")
+    grouped = (
+        df.groupby(["timestamp_30m", "region"])
+          .agg(rrp=("rrp", "mean"), demand=("demand", "mean"))
+          .reset_index()
+          .rename(columns={"timestamp_30m": "timestamp"})
+          .sort_values(["region", "timestamp"])
+          .reset_index(drop=True)
+    )
 
-    # Trading period number (1-48)
+    # Trading period number (1-48 per day, matches AEMO convention)
     grouped["period"] = (
         grouped["timestamp"].dt.hour * 2
         + (grouped["timestamp"].dt.minute >= 30).astype(int)
@@ -574,7 +590,12 @@ def main() -> int:
     args = ap.parse_args()
 
     # Smaller windows are safer — many APIs gate longer history behind paid tiers.
-    days_map = {"latest": 1, "full": 3, "backfill": 7}
+    # 5m interval = 12× more points than 1h. Keep windows smaller to stay
+    # within Community plan credits (~500/month) and API payload limits.
+    #   latest:    last 12h  = ~144 5m intervals × 5 regions × 2 metrics = ~1,440 rows
+    #   full:      last 48h  = ~576 intervals  × 5 regions × 2 = ~5,760 rows
+    #   backfill:  last 7d   = ~2016 intervals × 5 regions × 2 = ~20,160 rows
+    days_map = {"latest": 0.5, "full": 2, "backfill": 7}
     days = days_map[args.mode]
 
     if not os.environ.get("OPENELECTRICITY_API_KEY"):
@@ -599,7 +620,7 @@ def main() -> int:
         return 1
 
     try:
-        df_long = fetch_market_data(days=days)
+        df_long = fetch_market_data(days=days, interval="5m")
         df_30m = aggregate_to_30min(df_long)
         build_outputs(df_30m, mode=args.mode)
         return 0
