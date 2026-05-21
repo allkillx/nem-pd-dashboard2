@@ -274,7 +274,7 @@ def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     Returns DataFrame with columns:
       timestamp, region, rrp, demand, avail_gen, reserve, period
     """
-    df = df_30m.pivot_table(
+    df = df_long.pivot_table(
         index=["timestamp", "region"],
         columns="metric",
         values="value",
