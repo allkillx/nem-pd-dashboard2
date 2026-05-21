@@ -104,27 +104,28 @@ def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
     return rows
 
 
-def fetch_market_data(days: int = 7) -> pd.DataFrame:
+def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
     """
-    Fetch 30-min price + demand for all NEM regions over `days` days.
+    Fetch hourly price + demand for all NEM regions over `days` days.
+
+    OpenElectricity API only accepts: 5m, 1h, 1d, 7d, 1M, 3M, season, 1y, fy
+    We use '1h' by default — good balance of resolution vs payload size.
+    Pass interval='5m' for higher resolution (but limit window to a few days).
 
     Strategy:
-      • PRICE via get_market (the only market-level metric we're sure exists)
-      • DEMAND via get_network_data (NEM network data has demand)
-      • Use 30m interval directly — no resampling needed
-      • Window batched in 7-day chunks to stay within API payload limits
+      • PRICE via get_market(MarketMetric.PRICE)
+      • DEMAND via get_network_data(DataMetric.POWER or DEMAND)
+      • Window batched in chunks to stay within API limits
 
     Returns long-form DataFrame:
       columns = [timestamp, region, metric, value]
       metric ∈ {price, demand}
     """
-    end = datetime.now(timezone.utc).replace(microsecond=0, second=0)
-    # round down to half hour
-    end = end.replace(minute=0 if end.minute < 30 else 30)
+    end = datetime.now(timezone.utc).replace(microsecond=0, second=0, minute=0)
     start = end - timedelta(days=days)
-    log.info(f"Fetching NEM market data {start.isoformat()} → {end.isoformat()} ({days}d)")
+    log.info(f"Fetching NEM market data {start.isoformat()} → {end.isoformat()} ({days}d, {interval})")
 
-    # Lazy imports — these enums may not exist on older versions
+    # Lazy imports
     from openelectricity.types import MarketMetric
     try:
         from openelectricity.types import DataMetric
@@ -135,8 +136,10 @@ def fetch_market_data(days: int = 7) -> pd.DataFrame:
 
     rows: list[dict] = []
 
-    # Batch into 7-day chunks
-    chunk_days = 7
+    # Chunk size depends on interval — keep payload sane.
+    # 1h × 5 regions × 14 days = 1680 points, fine
+    # 5m × 5 regions × 2 days  = 2880 points, fine
+    chunk_days = 14 if interval == "1h" else 2
     cur_start = start
     with OEClient() as client:
         while cur_start < end:
@@ -150,7 +153,7 @@ def fetch_market_data(days: int = 7) -> pd.DataFrame:
                     dict(
                         network_code="NEM",
                         metrics=[MarketMetric.PRICE],
-                        interval="30m",
+                        interval=interval,
                         date_start=cur_start,
                         date_end=cur_end,
                         primary_grouping="network_region",
@@ -167,7 +170,8 @@ def fetch_market_data(days: int = 7) -> pd.DataFrame:
                 for attr in ("DEMAND", "DEMAND_ENERGY", "POWER"):
                     if hasattr(DataMetric, attr):
                         demand_metric = getattr(DataMetric, attr)
-                        log.info(f"  using DataMetric.{attr} for demand series")
+                        if cur_start == start:  # log once
+                            log.info(f"  using DataMetric.{attr} for demand series")
                         break
 
                 if demand_metric is not None:
@@ -177,7 +181,7 @@ def fetch_market_data(days: int = 7) -> pd.DataFrame:
                             dict(
                                 network_code="NEM",
                                 metrics=[demand_metric],
-                                interval="30m",
+                                interval=interval,
                                 date_start=cur_start,
                                 date_end=cur_end,
                                 primary_grouping="network_region",
@@ -202,10 +206,11 @@ def fetch_market_data(days: int = 7) -> pd.DataFrame:
     return df
 
 
-def aggregate_to_30min(df_30m: pd.DataFrame) -> pd.DataFrame:
+def aggregate_to_30min(df_long: pd.DataFrame) -> pd.DataFrame:
     """
-    Pivot long-form 30-min rows into wide table (one row per timestamp×region).
-    Data is already at 30-min granularity so this is just reshape + cleanup.
+    Pivot long-form metric rows into wide table (one row per timestamp×region).
+    Despite the name, this works for any interval (1h, 5m, etc.) — the data
+    is already at the API's native interval; this is just a reshape.
 
     Returns DataFrame with columns:
       timestamp, region, rrp, demand, avail_gen, reserve, period
