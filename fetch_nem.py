@@ -116,17 +116,20 @@ def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
 def _probe_api(client) -> dict:
     """
     Sanity check: try the simplest possible call (24h of price, no date_end).
-    This matches an example straight from OpenElectricity's own docs.
     Returns a dict with what worked / what didn't.
+    Uses Sydney-naive datetime as required by OpenElectricity API.
     """
     from openelectricity.types import MarketMetric
-    log.info("PROBE: minimal get_market call (last 24h price, no grouping)…")
+    from zoneinfo import ZoneInfo
+    sydney = ZoneInfo("Australia/Sydney")
+    probe_start = (datetime.now(sydney) - timedelta(hours=24)).replace(tzinfo=None)
+    log.info(f"PROBE: get_market last 24h price · date_start={probe_start.isoformat()} (Sydney naive)")
     try:
         resp = client.get_market(
             network_code="NEM",
             metrics=[MarketMetric.PRICE],
             interval="1h",
-            date_start=datetime.now(timezone.utc) - timedelta(hours=24),
+            date_start=probe_start,
         )
         n_series = len(resp.data) if resp and resp.data else 0
         n_points = sum(len(r.data) for ts in (resp.data or []) for r in (ts.results or []))
