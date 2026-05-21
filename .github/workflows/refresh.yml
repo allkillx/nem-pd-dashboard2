@@ -42,10 +42,13 @@ jobs:
 
 
 
-      - name: Diagnose API
+      - name: Fetch NEM data
         env:
           OPENELECTRICITY_API_KEY: ${{ secrets.OPENELECTRICITY_API_KEY }}
-        run: python diagnose_api.py
+        run: |
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          echo "Running mode: $MODE"
+          python fetch_nem.py --mode "$MODE"
 
 
       - name: Commit updated data
