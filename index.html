@@ -632,8 +632,8 @@
   <!-- Heatmap -->
   <section class="panel panel-heatmap">
     <div class="panel-header">
-      <div class="panel-title">Price Heatmap · 14 Days × 48 Intervals</div>
-      <div class="panel-meta" id="hmMeta">$/MWh</div>
+      <div class="panel-title">Price Heatmap · 14 Days × 48 Intervals (AEST)</div>
+      <div class="panel-meta" id="hmMeta">$/MWh · color scale by distribution (p10/p50/p75/p90)</div>
     </div>
     <div class="heatmap-wrap">
       <div class="heatmap" id="heatmap"></div>
@@ -1166,35 +1166,69 @@ function renderPDChart() {
 
 function renderHeatmap() {
   const data = dataCache[currentRegion].filter(d => !d.isFuture);
-  // Group by calendar date, then by 30-min bucket within that day (so 5min source data
-  // auto-aggregates to a sensible heatmap resolution).
-  const buckets = {}; // { 'YYYY-MM-DD': { '0': [vals], '1': [vals], ... '47': [vals] } }
+  // Bucket everything by Sydney local time (NEM market timezone),
+  // so the heatmap matches AEST hours that NEM participants actually trade in.
+  const sydneyParts = (d) => {
+    // returns {date: 'MM-DD', hh: 0-23, mm: 0-59} in Australia/Sydney
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    }).formatToParts(d.t);
+    const get = (t) => fmt.find(p => p.type === t)?.value;
+    return {
+      date: `${get('year')}-${get('month')}-${get('day')}`,
+      hh: parseInt(get('hour'), 10),
+      mm: parseInt(get('minute'), 10),
+    };
+  };
+
+  const buckets = {};
   data.forEach(d => {
-    const dateKey = d.t.toISOString().slice(0, 10);
-    const bucketIdx = d.t.getHours() * 2 + (d.t.getMinutes() >= 30 ? 1 : 0);
-    if (!buckets[dateKey]) buckets[dateKey] = {};
-    if (!buckets[dateKey][bucketIdx]) buckets[dateKey][bucketIdx] = [];
-    buckets[dateKey][bucketIdx].push(d.rrp);
+    const { date, hh, mm } = sydneyParts(d);
+    const bucketIdx = hh * 2 + (mm >= 30 ? 1 : 0);
+    if (!buckets[date]) buckets[date] = {};
+    if (!buckets[date][bucketIdx]) buckets[date][bucketIdx] = [];
+    buckets[date][bucketIdx].push(d.rrp);
   });
 
-  const dateKeys = Object.keys(buckets).sort().slice(-14);  // last 14 days
+  const dateKeys = Object.keys(buckets).sort().slice(-14);
   const matrix = [];
   const labels = [];
   const intervals = 48;
+  const allValues = [];
   for (const dateKey of dateKeys) {
     labels.push(dateKey.slice(5));
     const row = [];
     for (let i = 0; i < intervals; i++) {
       const vals = buckets[dateKey][i];
-      row.push(vals && vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null);
+      const avg = vals && vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      row.push(avg);
+      if (avg != null) allValues.push(avg);
     }
     matrix.push(row);
   }
 
+  // Dynamic color scale based on actual data distribution (more useful contrast
+  // than fixed thresholds — NEM prices cluster differently across regions/days).
+  const sorted = [...allValues].sort((a, b) => a - b);
+  const q = (p) => sorted[Math.max(0, Math.min(sorted.length - 1, Math.floor(sorted.length * p)))];
+  const p10 = q(0.10), p50 = q(0.50), p75 = q(0.75), p90 = q(0.90), p98 = q(0.98);
+
+  const colorForValue = (v) => {
+    if (v == null) return null;
+    if (v < 0) return '#1e40af';           // deep blue: negative
+    if (v < p10) return '#3b82f6';         // blue: bottom 10%
+    if (v < p50) return '#10b981';         // green: bottom half
+    if (v < p75) return '#84cc16';         // lime: middle-high
+    if (v < p90) return '#f59e0b';         // amber: top quartile
+    if (v < p98) return '#ef4444';         // red: top decile
+    return '#7f1d1d';                       // dark red: extreme spike (top 2%)
+  };
+
   const container = document.getElementById('heatmap');
   container.innerHTML = '';
-  // Axis label row
-  container.appendChild(document.createElement('div')); // corner
+  // Axis label row — show AEST hours
+  container.appendChild(document.createElement('div'));
   for (let i = 0; i < 48; i++) {
     const ax = document.createElement('div');
     ax.className = 'hm-axis';
@@ -1210,8 +1244,8 @@ function renderHeatmap() {
     row.forEach((val, iIdx) => {
       const cell = document.createElement('div');
       cell.className = 'hm-cell';
-      cell.style.background = val != null ? priceColor(val) : 'var(--bg-elevated)';
-      cell.style.opacity = val != null ? Math.min(1, 0.35 + Math.abs(val) / 400) : 0.2;
+      cell.style.background = val != null ? colorForValue(val) : 'var(--bg-elevated)';
+      cell.style.opacity = val != null ? 0.95 : 0.15;
       cell.dataset.val = val;
       cell.dataset.day = labels[dIdx];
       cell.dataset.hh = (iIdx / 2).toFixed(1);
@@ -1220,7 +1254,7 @@ function renderHeatmap() {
         tip.style.display = 'block';
         tip.style.left = (e.pageX + 10) + 'px';
         tip.style.top = (e.pageY + 10) + 'px';
-        tip.innerHTML = `<div style="color:#ffb547">${cell.dataset.day} ${String(Math.floor(iIdx/2)).padStart(2,'0')}:${iIdx%2?'30':'00'}</div>
+        tip.innerHTML = `<div style="color:#ffb547">${cell.dataset.day} ${String(Math.floor(iIdx/2)).padStart(2,'0')}:${iIdx%2?'30':'00'} AEST</div>
                          <div>$${formatPrice(parseFloat(cell.dataset.val))} /MWh</div>`;
       });
       cell.addEventListener('mouseleave', () => {
