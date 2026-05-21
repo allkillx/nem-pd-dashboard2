@@ -35,10 +35,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-# OpenElectricity SDK
+# OpenElectricity SDK — MarketMetric/DataMetric are lazy-imported inside fetch_market_data
 try:
     from openelectricity import OEClient
-    from openelectricity.types import MarketMetric
 except ImportError:
     print("ERROR: pip install 'openelectricity[analysis]'", file=sys.stderr)
     sys.exit(1)
@@ -61,80 +60,171 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────
 # DATA FETCH
 # ──────────────────────────────────────────────────────────────────────────
-def fetch_market_data(days: int = 30) -> pd.DataFrame:
+def _extract_region(result) -> str | None:
+    """OpenElectricity result objects expose region inconsistently — try several paths."""
+    # 1. .columns dict-like
+    if hasattr(result, "columns") and result.columns:
+        col = result.columns
+        if hasattr(col, "get"):
+            r = col.get("network_region") or col.get("region")
+            if r:
+                return r
+        # pydantic model
+        for attr in ("network_region", "region"):
+            r = getattr(col, attr, None)
+            if r:
+                return r
+    # 2. name like "price_NSW1" or "NSW1.price"
+    name = getattr(result, "name", "") or ""
+    for tok in name.replace(".", "_").split("_"):
+        if tok in {"NSW1", "VIC1", "QLD1", "SA1", "TAS1"}:
+            return tok
+    return None
+
+
+def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
+    """Run one API call and flatten results to long rows."""
+    fn = getattr(client, fn_name)
+    response = fn(**kwargs)
+    rows: list[dict] = []
+    for ts in response.data:
+        metric_name = str(ts.metric).split(".")[-1].lower()
+        for result in ts.results:
+            region = _extract_region(result)
+            if not region:
+                log.warning(f"[{label}] could not resolve region for result name={result.name!r}")
+                continue
+            for dp in result.data:
+                rows.append({
+                    "timestamp": dp.timestamp,
+                    "region": region,
+                    "metric": metric_name,
+                    "value": dp.value,
+                })
+    return rows
+
+
+def fetch_market_data(days: int = 7) -> pd.DataFrame:
     """
-    Fetch 5-min price + demand for all NEM regions over `days` days.
+    Fetch 30-min price + demand for all NEM regions over `days` days.
+
+    Strategy:
+      • PRICE via get_market (the only market-level metric we're sure exists)
+      • DEMAND via get_network_data (NEM network data has demand)
+      • Use 30m interval directly — no resampling needed
+      • Window batched in 7-day chunks to stay within API payload limits
 
     Returns long-form DataFrame:
       columns = [timestamp, region, metric, value]
       metric ∈ {price, demand}
     """
-    end = datetime.now(timezone.utc).replace(microsecond=0)
+    end = datetime.now(timezone.utc).replace(microsecond=0, second=0)
+    # round down to half hour
+    end = end.replace(minute=0 if end.minute < 30 else 30)
     start = end - timedelta(days=days)
-    log.info(f"Fetching NEM market data {start.isoformat()} → {end.isoformat()}")
+    log.info(f"Fetching NEM market data {start.isoformat()} → {end.isoformat()} ({days}d)")
+
+    # Lazy imports — these enums may not exist on older versions
+    from openelectricity.types import MarketMetric
+    try:
+        from openelectricity.types import DataMetric
+        has_data_metric = True
+    except ImportError:
+        has_data_metric = False
+        log.warning("DataMetric not available — demand will be unavailable")
 
     rows: list[dict] = []
+
+    # Batch into 7-day chunks
+    chunk_days = 7
+    cur_start = start
     with OEClient() as client:
-        response = client.get_market(
-            network_code="NEM",
-            metrics=[MarketMetric.PRICE, MarketMetric.DEMAND],
-            interval="5m",
-            date_start=start,
-            date_end=end,
-            primary_grouping="network_region",
-        )
-        for ts in response.data:
-            metric_name = str(ts.metric).split(".")[-1].lower()
-            for result in ts.results:
-                # result.name typically like "price_NSW1" or has columns dict
-                region = None
-                if hasattr(result, "columns") and result.columns:
-                    region = result.columns.get("network_region")
-                if region is None:
-                    # fallback: last token of name
-                    region = result.name.split("_")[-1] if result.name else None
-                for dp in result.data:
-                    rows.append({
-                        "timestamp": dp.timestamp,
-                        "region": region,
-                        "metric": metric_name,
-                        "value": dp.value,
-                    })
+        while cur_start < end:
+            cur_end = min(cur_start + timedelta(days=chunk_days), end)
+            log.info(f"  chunk {cur_start.date()} → {cur_end.date()}")
+
+            # ---- 1) PRICE via get_market ----
+            try:
+                rows += _fetch_chunk(
+                    client, "get_market",
+                    dict(
+                        network_code="NEM",
+                        metrics=[MarketMetric.PRICE],
+                        interval="30m",
+                        date_start=cur_start,
+                        date_end=cur_end,
+                        primary_grouping="network_region",
+                    ),
+                    label="price",
+                )
+            except Exception as e:
+                log.error(f"price fetch failed: {e}")
+
+            # ---- 2) DEMAND via get_network_data ----
+            if has_data_metric:
+                # DataMetric enum name varies between releases — try common spellings
+                demand_metric = None
+                for attr in ("DEMAND", "DEMAND_ENERGY", "POWER"):
+                    if hasattr(DataMetric, attr):
+                        demand_metric = getattr(DataMetric, attr)
+                        log.info(f"  using DataMetric.{attr} for demand series")
+                        break
+
+                if demand_metric is not None:
+                    try:
+                        demand_rows = _fetch_chunk(
+                            client, "get_network_data",
+                            dict(
+                                network_code="NEM",
+                                metrics=[demand_metric],
+                                interval="30m",
+                                date_start=cur_start,
+                                date_end=cur_end,
+                                primary_grouping="network_region",
+                            ),
+                            label="demand",
+                        )
+                        # Normalize metric label to 'demand' regardless of source
+                        for r in demand_rows:
+                            r["metric"] = "demand"
+                        rows += demand_rows
+                    except Exception as e:
+                        log.warning(f"demand fetch failed: {e} — continuing without demand series")
+
+            cur_start = cur_end
+
     df = pd.DataFrame(rows)
     if df.empty:
         raise RuntimeError("No data returned from OpenElectricity API")
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    log.info(f"Fetched {len(df):,} rows across {df['region'].nunique()} regions")
+    df = df.dropna(subset=["region", "value"])
+    log.info(f"Fetched {len(df):,} rows · regions={sorted(df['region'].unique())} · metrics={sorted(df['metric'].unique())}")
     return df
 
 
-def aggregate_to_30min(df_5m: pd.DataFrame) -> pd.DataFrame:
+def aggregate_to_30min(df_30m: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate 5-min data to 30-min NEM trading intervals.
-    Price → time-weighted mean (simple mean for now — AEMO uses TW),
-    Demand → mean.
+    Pivot long-form 30-min rows into wide table (one row per timestamp×region).
+    Data is already at 30-min granularity so this is just reshape + cleanup.
 
-    Returns wide DataFrame indexed by (timestamp, region) with cols:
-      rrp, demand
+    Returns DataFrame with columns:
+      timestamp, region, rrp, demand, avail_gen, reserve, period
     """
-    df = df_5m.pivot_table(
+    df = df_30m.pivot_table(
         index=["timestamp", "region"],
         columns="metric",
         values="value",
-        aggfunc="first",
+        aggfunc="mean",
     ).reset_index()
-    # Rename for consistency with AEMO/dashboard schema
     df = df.rename(columns={"price": "rrp"})
 
-    # Floor timestamps to 30-min bins
-    df["bin"] = df["timestamp"].dt.floor("30min")
+    # Demand may be missing if the API call failed for it — fill with NaN column
+    if "demand" not in df.columns:
+        df["demand"] = float("nan")
+    if "rrp" not in df.columns:
+        raise RuntimeError("Price (rrp) missing from API response — cannot continue")
 
-    grouped = (
-        df.groupby(["bin", "region"])
-        .agg(rrp=("rrp", "mean"), demand=("demand", "mean"))
-        .reset_index()
-        .rename(columns={"bin": "timestamp"})
-    )
+    grouped = df.rename(columns={"timestamp": "timestamp"}).sort_values(["region", "timestamp"]).reset_index(drop=True)
 
     # Trading period number (1-48)
     grouped["period"] = (
@@ -142,10 +232,12 @@ def aggregate_to_30min(df_5m: pd.DataFrame) -> pd.DataFrame:
         + (grouped["timestamp"].dt.minute >= 30).astype(int)
         + 1
     )
-    # Reserve placeholder (true available_gen requires DispatchRegionSum table;
-    # for now we estimate as 1.25× demand minus stochastic component, or set NaN
-    # if you want the dashboard to hide this series)
-    grouped["avail_gen"] = grouped["demand"] * 1.22 + np.random.normal(0, 80, len(grouped))
+    # Reserve placeholder. Real avail-gen requires DispatchRegionSum (next-day data).
+    # Estimate as 1.22× demand + noise so dashboard has a reasonable third series.
+    # If demand is NaN (API failed for it), set both to NaN — dashboard hides empty series.
+    has_demand = grouped["demand"].notna()
+    noise = np.random.normal(0, 80, len(grouped))
+    grouped["avail_gen"] = np.where(has_demand, grouped["demand"] * 1.22 + noise, np.nan)
     grouped["reserve"] = grouped["avail_gen"] - grouped["demand"]
     return grouped
 
@@ -398,8 +490,8 @@ def main() -> int:
         return 1
 
     try:
-        df_5m = fetch_market_data(days=days)
-        df_30m = aggregate_to_30min(df_5m)
+        df_long = fetch_market_data(days=days)
+        df_30m = aggregate_to_30min(df_long)
         build_outputs(df_30m, mode=args.mode)
         return 0
     except Exception as e:
