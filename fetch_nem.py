@@ -85,7 +85,16 @@ def _extract_region(result) -> str | None:
 def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
     """Run one API call and flatten results to long rows."""
     fn = getattr(client, fn_name)
-    response = fn(**kwargs)
+    try:
+        response = fn(**kwargs)
+    except Exception as e:
+        # Pull out the full error body if the SDK attached it
+        body = getattr(e, "response", None) or getattr(e, "body", None) or getattr(e, "detail", None)
+        log.error(f"[{label}] {fn_name} call FAILED. args={kwargs}")
+        log.error(f"[{label}] exception type={type(e).__name__} repr={e!r}")
+        if body:
+            log.error(f"[{label}] error body: {body}")
+        raise
     rows: list[dict] = []
     for ts in response.data:
         metric_name = str(ts.metric).split(".")[-1].lower()
@@ -102,6 +111,39 @@ def _fetch_chunk(client, fn_name: str, kwargs: dict, label: str) -> list[dict]:
                     "value": dp.value,
                 })
     return rows
+
+
+def _probe_api(client) -> dict:
+    """
+    Sanity check: try the simplest possible call (24h of price, no date_end).
+    This matches an example straight from OpenElectricity's own docs.
+    Returns a dict with what worked / what didn't.
+    """
+    from openelectricity.types import MarketMetric
+    log.info("PROBE: minimal get_market call (last 24h price, no grouping)…")
+    try:
+        resp = client.get_market(
+            network_code="NEM",
+            metrics=[MarketMetric.PRICE],
+            interval="1h",
+            date_start=datetime.now(timezone.utc) - timedelta(hours=24),
+        )
+        n_series = len(resp.data) if resp and resp.data else 0
+        n_points = sum(len(r.data) for ts in (resp.data or []) for r in (ts.results or []))
+        log.info(f"PROBE OK: {n_series} series, {n_points} data points")
+        # Inspect first result so we learn the actual shape
+        if resp.data and resp.data[0].results:
+            r0 = resp.data[0].results[0]
+            log.info(f"PROBE sample result: name={r0.name!r} columns={getattr(r0, 'columns', None)!r}")
+            if r0.data:
+                log.info(f"PROBE first point: ts={r0.data[0].timestamp} value={r0.data[0].value}")
+        return {"ok": True, "series": n_series, "points": n_points}
+    except Exception as e:
+        body = getattr(e, "response", None) or getattr(e, "body", None) or getattr(e, "detail", None)
+        log.error(f"PROBE FAILED: {type(e).__name__}: {e!r}")
+        if body:
+            log.error(f"PROBE error body: {body}")
+        return {"ok": False, "error": str(e)}
 
 
 def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
@@ -121,9 +163,7 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
       columns = [timestamp, region, metric, value]
       metric ∈ {price, demand}
     """
-    end = datetime.now(timezone.utc).replace(microsecond=0, second=0, minute=0)
-    start = end - timedelta(days=days)
-    log.info(f"Fetching NEM market data {start.isoformat()} → {end.isoformat()} ({days}d, {interval})")
+    log.info(f"Fetching NEM market data — last {days}d, interval={interval}")
 
     # Lazy imports
     from openelectricity.types import MarketMetric
@@ -134,68 +174,79 @@ def fetch_market_data(days: int = 7, interval: str = "1h") -> pd.DataFrame:
         has_data_metric = False
         log.warning("DataMetric not available — demand will be unavailable")
 
+    # Use SDK pattern that matches official docs: date_start only, no date_end.
+    # Single call (no batching) — 1h × 5 regions × 7 days = 840 points, well within limits.
+    start = datetime.now(timezone.utc) - timedelta(days=days)
     rows: list[dict] = []
 
-    # Chunk size depends on interval — keep payload sane.
-    # 1h × 5 regions × 14 days = 1680 points, fine
-    # 5m × 5 regions × 2 days  = 2880 points, fine
-    chunk_days = 14 if interval == "1h" else 2
-    cur_start = start
     with OEClient() as client:
-        while cur_start < end:
-            cur_end = min(cur_start + timedelta(days=chunk_days), end)
-            log.info(f"  chunk {cur_start.date()} → {cur_end.date()}")
-
-            # ---- 1) PRICE via get_market ----
+        # ---- 1) PRICE via get_market ----
+        # Try several parameter combinations; first one that works wins.
+        price_attempts = [
+            # A. official-docs style: with primary_grouping
+            dict(
+                network_code="NEM",
+                metrics=[MarketMetric.PRICE],
+                interval=interval,
+                date_start=start,
+                primary_grouping="network_region",
+            ),
+            # B. without primary_grouping (some SDK versions reject it)
+            dict(
+                network_code="NEM",
+                metrics=[MarketMetric.PRICE],
+                interval=interval,
+                date_start=start,
+            ),
+        ]
+        price_ok = False
+        for i, kw in enumerate(price_attempts):
             try:
-                rows += _fetch_chunk(
-                    client, "get_market",
+                rows += _fetch_chunk(client, "get_market", kw, label=f"price-attempt-{i}")
+                log.info(f"Price fetch succeeded with attempt {i}: keys={list(kw.keys())}")
+                price_ok = True
+                break
+            except Exception as e:
+                log.warning(f"Price attempt {i} failed: {e}. Trying next variant…")
+
+        if not price_ok:
+            log.error("All price-fetch variants failed.")
+
+        # ---- 2) DEMAND via get_network_data ----
+        if has_data_metric:
+            demand_metric = None
+            for attr in ("DEMAND", "DEMAND_ENERGY", "POWER"):
+                if hasattr(DataMetric, attr):
+                    demand_metric = getattr(DataMetric, attr)
+                    log.info(f"Using DataMetric.{attr} for demand series")
+                    break
+
+            if demand_metric is not None:
+                demand_attempts = [
                     dict(
                         network_code="NEM",
-                        metrics=[MarketMetric.PRICE],
+                        metrics=[demand_metric],
                         interval=interval,
-                        date_start=cur_start,
-                        date_end=cur_end,
+                        date_start=start,
                         primary_grouping="network_region",
                     ),
-                    label="price",
-                )
-            except Exception as e:
-                log.error(f"price fetch failed: {e}")
-
-            # ---- 2) DEMAND via get_network_data ----
-            if has_data_metric:
-                # DataMetric enum name varies between releases — try common spellings
-                demand_metric = None
-                for attr in ("DEMAND", "DEMAND_ENERGY", "POWER"):
-                    if hasattr(DataMetric, attr):
-                        demand_metric = getattr(DataMetric, attr)
-                        if cur_start == start:  # log once
-                            log.info(f"  using DataMetric.{attr} for demand series")
-                        break
-
-                if demand_metric is not None:
+                    dict(
+                        network_code="NEM",
+                        metrics=[demand_metric],
+                        interval=interval,
+                        date_start=start,
+                    ),
+                ]
+                for i, kw in enumerate(demand_attempts):
                     try:
-                        demand_rows = _fetch_chunk(
-                            client, "get_network_data",
-                            dict(
-                                network_code="NEM",
-                                metrics=[demand_metric],
-                                interval=interval,
-                                date_start=cur_start,
-                                date_end=cur_end,
-                                primary_grouping="network_region",
-                            ),
-                            label="demand",
-                        )
-                        # Normalize metric label to 'demand' regardless of source
+                        demand_rows = _fetch_chunk(client, "get_network_data", kw, label=f"demand-attempt-{i}")
                         for r in demand_rows:
                             r["metric"] = "demand"
                         rows += demand_rows
+                        log.info(f"Demand fetch succeeded with attempt {i}")
+                        break
                     except Exception as e:
-                        log.warning(f"demand fetch failed: {e} — continuing without demand series")
-
-            cur_start = cur_end
+                        log.warning(f"Demand attempt {i} failed: {e}. Trying next variant…")
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -487,11 +538,29 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    days_map = {"latest": 1, "full": 7, "backfill": 30}
+    # Smaller windows are safer — many APIs gate longer history behind paid tiers.
+    days_map = {"latest": 1, "full": 3, "backfill": 7}
     days = days_map[args.mode]
 
     if not os.environ.get("OPENELECTRICITY_API_KEY"):
         log.error("OPENELECTRICITY_API_KEY env var not set")
+        return 1
+
+    # PROBE: figure out whether the API actually works at all
+    try:
+        with OEClient() as probe_client:
+            probe_result = _probe_api(probe_client)
+        if not probe_result.get("ok"):
+            log.error("Probe failed — see error body above. Aborting before main fetch.")
+            atomic_write_json(DATA_DIR / "meta.json", {
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "status": "probe_failed",
+                "error": probe_result.get("error"),
+                "mode": args.mode,
+            })
+            return 1
+    except Exception as e:
+        log.exception(f"Probe crashed: {e}")
         return 1
 
     try:
