@@ -40,13 +40,13 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Fetch NEM data
+
+
+      - name: Diagnose API
         env:
           OPENELECTRICITY_API_KEY: ${{ secrets.OPENELECTRICITY_API_KEY }}
-        run: |
-          MODE="${{ github.event.inputs.mode || 'full' }}"
-          echo "Running mode: $MODE"
-          python fetch_nem.py --mode "$MODE"
+        run: python diagnose_api.py
+
 
       - name: Commit updated data
         run: |
