@@ -587,7 +587,7 @@ def main() -> int:
     #   latest:    last 12h  = ~144 5m intervals × 5 regions × 2 metrics = ~1,440 rows
     #   full:      last 48h  = ~576 intervals  × 5 regions × 2 = ~5,760 rows
     #   backfill:  last 7d   = ~2016 intervals × 5 regions × 2 = ~20,160 rows
-    days_map = {"latest": 1, "full": 7, "backfill": 30}
+    days_map = {"latest": 1, "full": 7, "backfill": 14}
     days = days_map[args.mode]
 
     if not os.environ.get("OPENELECTRICITY_API_KEY"):
