@@ -62,3 +62,10 @@ jobs:
             git commit -m "data: refresh $(date -u +%FT%TZ)"
             git push
           fi
+
+      - name: Fetch AEMO extra (STPASA / PD / weather)
+        run: python fetch_aemo_extra.py
+
+        git add fetch_aemo_extra.py
+git commit -m "add stpasa/predispatch/weather pipeline"
+git push
