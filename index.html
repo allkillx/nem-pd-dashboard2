@@ -255,7 +255,7 @@
     padding: 16px 20px;
     display: grid;
     grid-template-columns: 1.2fr 1fr;
-    grid-template-rows: auto auto auto;
+    grid-template-rows: auto auto auto auto;
     gap: 14px;
   }
   .panel {
@@ -377,8 +377,12 @@
   .panel-forecast { grid-column: 1; grid-row: 2; }
   .panel-anomaly { grid-column: 2; grid-row: 2; }
 
+  /* ST PASA + WEATHER (row 3) */
+  .panel-stpasa { grid-column: 1; grid-row: 3; }
+  .panel-weather { grid-column: 2; grid-row: 3; }
+
   /* DATA TABLE */
-  .panel-table { grid-column: 1 / -1; grid-row: 3; }
+  .panel-table { grid-column: 1 / -1; grid-row: 4; }
   .data-table {
     width: 100%;
     border-collapse: collapse;
@@ -544,15 +548,18 @@
   /* RESPONSIVE */
   @media (max-width: 1100px) {
     main { grid-template-columns: 1fr; }
-    .panel-pd, .panel-heatmap, .panel-forecast, .panel-anomaly { grid-column: 1; }
+    .panel-pd, .panel-heatmap, .panel-forecast, .panel-anomaly, .panel-stpasa, .panel-weather { grid-column: 1; }
     .panel-pd { grid-row: 1; }
     .panel-heatmap { grid-row: 2; }
     .panel-forecast { grid-row: 3; }
     .panel-anomaly { grid-row: 4; }
-    .panel-table { grid-row: 5; }
+    .panel-stpasa { grid-row: 5; }
+    .panel-weather { grid-row: 6; }
+    .panel-table { grid-row: 7; }
   }
   @media (max-width: 700px) {
     .stats-grid, .forecast-summary { grid-template-columns: repeat(2, 1fr); }
+    .weather-stats { grid-template-columns: repeat(2, 1fr) !important; }
     .ticker-row { display: none; }
   }
 
@@ -645,7 +652,7 @@
   <section class="panel panel-forecast">
     <div class="panel-header">
       <div class="panel-title">ML Forecast · Next 24 Trading Intervals</div>
-      <div class="panel-meta">Model: Gradient Boost · Features: TOD, DOW, Lag-48, Demand, Gen Margin</div>
+      <div class="panel-meta">ML Gradient Boost (紫虚线) vs AEMO Predispatch 官方预测 (蓝虚线)</div>
     </div>
     <div class="forecast-summary" id="forecastSummary"></div>
     <div class="chart-container" style="height:180px"><canvas id="forecastChart"></canvas></div>
@@ -659,6 +666,30 @@
     </div>
     <div class="stats-grid" id="anomalyStats"></div>
     <div class="anomaly-list" id="anomalyList"></div>
+  </section>
+
+  <!-- ST PASA 7-day adequacy -->
+  <section class="panel panel-stpasa">
+    <div class="panel-header">
+      <div class="panel-title">ST PASA · 7-Day Adequacy Outlook</div>
+      <div class="panel-meta" id="stpasaMeta">POE10/50/90 demand vs available capacity · AEMO</div>
+    </div>
+    <div class="chart-container" style="height:220px"><canvas id="stpasaChart"></canvas></div>
+    <div class="chart-legend">
+      <div class="legend-item"><div class="legend-swatch" style="background:rgba(96,165,250,0.35)"></div>POE10–POE90 需求区间</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#60a5fa"></div>POE50 需求 MW</div>
+      <div class="legend-item" style="color:#4ade80"><div class="legend-swatch dash" style="color:#4ade80"></div>可用容量 MW</div>
+    </div>
+  </section>
+
+  <!-- Weather -->
+  <section class="panel panel-weather">
+    <div class="panel-header">
+      <div class="panel-title">Weather · Region Capitals</div>
+      <div class="panel-meta" id="weatherMeta">Open-Meteo · 温度驱动需求 / 辐射驱动光伏</div>
+    </div>
+    <div class="stats-grid weather-stats" id="weatherStats" style="grid-template-columns:repeat(5,1fr);gap:6px"></div>
+    <div class="chart-container" style="height:160px"><canvas id="weatherChart"></canvas></div>
   </section>
 
   <!-- Data table -->
@@ -831,6 +862,9 @@ function generateRegionData(regionId, days = 30) {
 const dataCache = {};
 let remoteForecast = null;   // { regions: { NSW1: [{timestamp,pred,lo,hi}, ...] } }
 let remoteAnomalies = null;  // { items: [...] }
+let remotePredispatch = null; // { regions: { NSW1: [{t, rrp, demand, availGen}] } }  ← fetch_aemo_extra.py
+let remoteStpasa = null;      // { regions: { NSW1: [{t, demand10, demand50, demand90, availCap}] } }
+let remoteWeather = null;     // { regions: { NSW1: { city, current, hourly } } }
 let dataSource = 'synthetic'; // 'live' | 'synthetic'
 
 // Default: synthetic fallback so dashboard renders before / on fetch failure
@@ -910,6 +944,29 @@ async function loadLiveData() {
     if (statusEl) statusEl.textContent = 'Demo Sim';
     return false;
   }
+}
+
+// ============================================================
+// AUX DATA LOADER — predispatch / stpasa / weather
+// (written by fetch_aemo_extra.py; independent of loadLiveData so these
+//  panels still show real data even when history falls back to synthetic)
+// ============================================================
+async function loadAuxData() {
+  const grab = async (path) => {
+    try {
+      const r = await fetch(path, { cache: 'no-store' });
+      return r.ok ? await r.json() : null;
+    } catch { return null; }
+  };
+  [remotePredispatch, remoteStpasa, remoteWeather] = await Promise.all([
+    grab('./data/predispatch.json'),
+    grab('./data/stpasa.json'),
+    grab('./data/weather.json'),
+  ]);
+  console.log('[NEM] Aux data:',
+    'PD=' + (remotePredispatch ? 'ok' : '—'),
+    'STPASA=' + (remoteStpasa ? 'ok' : '—'),
+    'Weather=' + (remoteWeather ? 'ok' : '—'));
 }
 
 // ============================================================
@@ -1007,7 +1064,7 @@ function detectAnomalies(data) {
 // ============================================================
 let currentRegion = 'NSW1';
 let currentRange = 24;
-let pdChart, forecastChart;
+let pdChart, forecastChart, stpasaChart, weatherChart;
 
 function priceColor(p) {
   if (p < 0) return '#3b82f6';
@@ -1335,6 +1392,23 @@ function renderForecast() {
     sum.appendChild(card);
   });
 
+  // AEMO PREDISPATCH 官方预测 — 按最近时间戳对齐到 ML 预测的时间轴
+  let pdOverlay = [];
+  if (remotePredispatch && remotePredispatch.regions && remotePredispatch.regions[currentRegion]
+      && remotePredispatch.regions[currentRegion].length) {
+    const pdRows = remotePredispatch.regions[currentRegion]
+      .map(p => ({ t: new Date(p.t), rrp: p.rrp }));
+    const nearest = (target) => {
+      let best = null, bestDiff = 16 * 60 * 1000; // 容差16分钟
+      for (const p of pdRows) {
+        const diff = Math.abs(p.t - target);
+        if (diff < bestDiff) { bestDiff = diff; best = p.rrp; }
+      }
+      return best;
+    };
+    pdOverlay = forecasts.map(f => nearest(f.t));
+  }
+
   // Forecast chart
   const recent = history.slice(-24);
   const ctx = document.getElementById('forecastChart').getContext('2d');
@@ -1367,14 +1441,23 @@ function renderForecast() {
           tension: 0.15
         },
         {
-          label: 'Forecast',
+          label: 'Forecast (ML)',
           data: [...Array(recent.length - 1).fill(null), recent[recent.length-1].rrp, ...forecasts.map(f => f.pred)],
           borderColor: '#e879f9',
           borderWidth: 1.8,
           borderDash: [4, 3],
           pointRadius: 0,
           tension: 0.15
-        }
+        },
+        ...(pdOverlay.some(v => v != null) ? [{
+          label: 'AEMO PD',
+          data: [...Array(recent.length).fill(null), ...pdOverlay],
+          borderColor: '#60a5fa',
+          borderWidth: 1.5,
+          borderDash: [7, 3],
+          pointRadius: 0,
+          tension: 0.15
+        }] : [])
       ]
     },
     options: {
@@ -1431,6 +1514,155 @@ function renderAnomalies() {
   }
 }
 
+// ============================================================
+// ST PASA — 未来7天 POE 需求区间 vs 可用容量
+// (data/stpasa.json, 来自 fetch_aemo_extra.py)
+// ============================================================
+function renderStpasa() {
+  const canvas = document.getElementById('stpasaChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (stpasaChart) { stpasaChart.destroy(); stpasaChart = null; }
+  const meta = document.getElementById('stpasaMeta');
+  const rows = (remoteStpasa && remoteStpasa.regions && remoteStpasa.regions[currentRegion]) || [];
+  if (!rows.length) {
+    if (meta) meta.textContent = '暂无 ST PASA 数据 — 请先运行 fetch_aemo_extra.py';
+    return;
+  }
+  const labels = rows.map(r => sydneyShort(r.t));
+  stpasaChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'POE10 需求', data: rows.map(r => r.demand10),
+          borderColor: 'transparent', backgroundColor: 'rgba(96,165,250,0.14)',
+          fill: '+1', pointRadius: 0 },
+        { label: 'POE90 需求', data: rows.map(r => r.demand90),
+          borderColor: 'transparent', fill: false, pointRadius: 0 },
+        { label: 'POE50 需求', data: rows.map(r => r.demand50),
+          borderColor: '#60a5fa', borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+        { label: '可用容量', data: rows.map(r => r.availCap),
+          borderColor: '#4ade80', borderWidth: 1.5, borderDash: [4, 3],
+          pointRadius: 0, tension: 0.2 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0f141c', borderColor: '#60a5fa', borderWidth: 1,
+          titleColor: '#60a5fa',
+          titleFont: { family: 'JetBrains Mono', size: 11 },
+          bodyFont: { family: 'JetBrains Mono', size: 11 },
+          padding: 10,
+          callbacks: {
+            label: (c) => c.parsed.y == null ? null
+              : `${c.dataset.label}: ${c.parsed.y.toFixed(0)} MW`
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#4a5868', font: { family: 'JetBrains Mono', size: 9 },
+             maxRotation: 0, autoSkip: true, maxTicksLimit: 10 }, grid: { color: '#161e2a' } },
+        y: { ticks: { color: '#7a8a9e', font: { family: 'JetBrains Mono', size: 9 },
+             callback: v => (v / 1000).toFixed(1) + 'k' }, grid: { color: '#161e2a' } }
+      }
+    }
+  });
+  if (meta) {
+    const margins = rows
+      .filter(r => r.availCap != null && r.demand50 != null)
+      .map(r => r.availCap - r.demand50);
+    const minMargin = margins.length ? Math.min(...margins) : null;
+    meta.textContent = `${currentRegion} · run ${remoteStpasa.run || '—'} · ${rows.length} 个区间` +
+      (minMargin != null ? ` · 最低盈余 ${(minMargin / 1000).toFixed(1)} GW` : '');
+  }
+}
+
+// ============================================================
+// 天气 — 各州首府当前温度 + 当前州的温度/辐射曲线
+// (data/weather.json, 来自 fetch_aemo_extra.py · Open-Meteo)
+// ============================================================
+function renderWeather() {
+  const statsEl = document.getElementById('weatherStats');
+  const canvas = document.getElementById('weatherChart');
+  if (!statsEl || !canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (weatherChart) { weatherChart.destroy(); weatherChart = null; }
+  statsEl.innerHTML = '';
+  const wx = remoteWeather && remoteWeather.regions;
+  if (!wx) {
+    statsEl.innerHTML = '<div style="grid-column:1/-1;padding:16px;color:var(--text-faint);' +
+      'text-align:center;font-size:11px">暂无天气数据 — 请先运行 fetch_aemo_extra.py</div>';
+    return;
+  }
+  // 五个州的当前温度小卡片, 当前选中的州高亮
+  Object.keys(REGIONS).forEach(r => {
+    const w = wx[r];
+    const el = document.createElement('div');
+    el.className = 'stat-box';
+    el.style.cursor = 'pointer';
+    if (r === currentRegion) el.style.borderColor = 'var(--amber)';
+    el.innerHTML = w ? `
+      <div class="stat-label">${w.city}</div>
+      <div class="stat-value">${w.current && w.current.temp != null ? w.current.temp.toFixed(1) + '°' : '—'}</div>
+      <div class="stat-detail">体感 ${w.current && w.current.apparent != null ? w.current.apparent.toFixed(0) + '°' : '—'} · 风 ${w.current && w.current.wind != null ? w.current.wind.toFixed(0) : '—'} km/h</div>
+    ` : `<div class="stat-label">${r}</div><div class="stat-value">—</div>`;
+    // 点击卡片 = 切换到该州 (联动全页)
+    el.addEventListener('click', () => {
+      const tab = document.querySelector(`.region-tab[data-region="${r}"]`);
+      if (tab) tab.click();
+    });
+    statsEl.appendChild(el);
+  });
+  // 当前州: 过去24h + 未来72h 温度与太阳辐射
+  const hourly = (wx[currentRegion] && wx[currentRegion].hourly) || [];
+  if (!hourly.length) return;
+  weatherChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: hourly.map(h => h.t.slice(5, 16).replace('T', ' ')),
+      datasets: [
+        { label: '温度 °C', data: hourly.map(h => h.temp),
+          borderColor: '#ffb547', borderWidth: 1.5, pointRadius: 0,
+          tension: 0.3, yAxisID: 'yT' },
+        { label: '太阳辐射 W/m²', data: hourly.map(h => h.radiation),
+          borderColor: '#e879f9', backgroundColor: 'rgba(232,121,249,0.08)',
+          borderWidth: 1, pointRadius: 0, fill: true, tension: 0.3, yAxisID: 'yR' }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0f141c', borderColor: '#ffb547', borderWidth: 1,
+          titleColor: '#ffb547',
+          titleFont: { family: 'JetBrains Mono', size: 11 },
+          bodyFont: { family: 'JetBrains Mono', size: 11 },
+          padding: 10
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#4a5868', font: { family: 'JetBrains Mono', size: 9 },
+             maxRotation: 0, autoSkip: true, maxTicksLimit: 10 }, grid: { color: '#161e2a' } },
+        yT: { position: 'left', ticks: { color: '#ffb547',
+              font: { family: 'JetBrains Mono', size: 9 }, callback: v => v + '°' },
+              grid: { color: '#161e2a' } },
+        yR: { position: 'right', ticks: { color: '#e879f9',
+              font: { family: 'JetBrains Mono', size: 9 } }, grid: { display: false } }
+      }
+    }
+  });
+  const metaEl = document.getElementById('weatherMeta');
+  if (metaEl) metaEl.textContent =
+    `${(wx[currentRegion] && wx[currentRegion].city) || currentRegion} · 过去24h + 未来72h · Open-Meteo`;
+}
+
 function renderTable() {
   const data = dataCache[currentRegion].filter(d => !d.isFuture).slice(-48).reverse();
   const allHistory = dataCache[currentRegion].filter(d => !d.isFuture);
@@ -1467,6 +1699,8 @@ function renderAll() {
   renderHeatmap();
   renderForecast();
   renderAnomalies();
+  renderStpasa();
+  renderWeather();
   renderTable();
 }
 
@@ -1520,15 +1754,16 @@ document.querySelectorAll('#overlayTabs .range-btn').forEach(btn => {
 
 // Initial render — try live data first, fall back to synthetic
 (async function init() {
-  await loadLiveData();
+  await Promise.all([loadLiveData(), loadAuxData()]);
   renderAll();
 })();
 
 // Auto-refresh every 5 minutes (skips if tab hidden)
 setInterval(async () => {
   if (document.hidden) return;
+  await loadAuxData();
   const ok = await loadLiveData();
-  if (ok) renderAll();
+  renderAll();
 }, 5 * 60 * 1000);
 </script>
 
