@@ -1,1 +1,1 @@
-{"updated":"2026-09-09T05:00:44.182187+00:00","items":[]}
+{"updated":"2026-09-09T10:00:05.112857+00:00","items":[{"timestamp":"2026-09-09T07:55:00+00:00","region":"TAS1","rrp":320.36,"z":4.614694139363266,"severity":"spike","msg":"Price spike"},{"timestamp":"2026-09-08T07:30:00+00:00","region":"NSW1","rrp":190.84,"z":3.18340763348945,"severity":"warn","msg":"Anomalous low price"}]}
